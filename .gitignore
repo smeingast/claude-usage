@@ -1,0 +1,37 @@
+# ───── Build output ─────
+build/                 # produced by ./build.sh (the .app bundle)
+DerivedData/
+*.o
+*.swiftmodule
+*.dSYM/
+
+# ───── Swift Package Manager (if ever added) ─────
+.build/
+.swiftpm/
+
+# ───── Xcode (if ever added) ─────
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# ───── macOS ─────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+
+# ───── Editors / tooling ─────
+*.swp
+*~
+.vscode/
+.idea/
+
+# ───── Claude Code (local, per-machine settings) ─────
+.claude/settings.local.json
