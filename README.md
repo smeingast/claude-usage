@@ -37,16 +37,16 @@ Dropdown:   5-hour limit — 14%  ·  resets 17:40
 
 ## Display styles & color
 
-Choose how the two values look from the **Display Style** menu — from the
-icon-style concentric rings (default; outer = 5-hour, inner = weekly) to
-percentages, bars, twin rings, gauges, pie slices, or segments:
+Choose how the two values look from the **Display Style** menu — from concentric
+rings (default; outer = 5-hour, inner = weekly) to percentages, bars, twin rings,
+gauges, pie slices, or segments:
 
 ![Display styles](assets/styles.png)
 
 The **Color** menu controls how usage maps to color:
 
-- **Thresholds** (default) — normal, orange ≥ 70 %, red ≥ 90 %
-- **Monochrome** — adapts to the menu bar (light / dark)
+- **Monochrome** (default) — adapts to the menu bar (light / dark)
+- **Thresholds** — normal, orange ≥ 70 %, red ≥ 90 %
 - **Heatmap** — green → red as usage climbs
 - **System accent** — your macOS accent color
 

@@ -6,7 +6,7 @@ enum DisplayStyle: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .concentric:  return "Concentric rings (like the icon)"
+        case .concentric:  return "Concentric rings"
         case .percentages: return "Percentages"
         case .bars:        return "Bars"
         case .rings:       return "Twin rings"
@@ -41,7 +41,7 @@ enum Settings {
         set { d.set(newValue.rawValue, forKey: "displayStyle") }
     }
     static var colorMode: ColorMode {
-        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .thresholds }
+        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .monochrome }
         set { d.set(newValue.rawValue, forKey: "colorMode") }
     }
 }
