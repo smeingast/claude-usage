@@ -67,7 +67,8 @@ The **Color** menu controls how usage maps to color:
 
 The result is a self-contained `.app` that uses only system frameworks (the Swift
 runtime ships with macOS). It's deliberately light: a single status item, a
-~2-minute poll with rate-limit backoff, and ephemeral network requests.
+~5-minute poll (plus on-demand refresh when you open the menu) with rate-limit
+backoff, and ephemeral network requests.
 
 ## Run on your other Macs
 

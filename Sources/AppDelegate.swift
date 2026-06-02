@@ -3,12 +3,13 @@ import AppKit
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Poll cadence. The data changes slowly and the endpoint is rate-limited,
-    // so a gentle interval keeps things light and avoids 429s.
-    private let refreshInterval: TimeInterval = 120
+    // so a gentle interval keeps things light and avoids 429s. We also refresh
+    // on menu-open and wake, so the number is fresh whenever you actually look.
+    private let refreshInterval: TimeInterval = 300
     // Don't refetch more often than this (guards rapid menu opens / wakes).
     private let minFetchGap: TimeInterval = 20
     // Back off this long after the server rate-limits us (HTTP 429).
-    private let rateLimitCooldown: TimeInterval = 120
+    private let rateLimitCooldown: TimeInterval = 300
 
     private let client = UsageClient()
     private var statusItem: NSStatusItem!
@@ -20,6 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var snapshot: UsageSnapshot?
     private var lastError: String?
+    private var needsAuth = false       // true only when the token is rejected
 
     // Menu rows we mutate as data arrives.
     private let fiveHourItem = NSMenuItem()
@@ -133,11 +135,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 snapshot = try await client.fetch()
                 lastError = nil
+                needsAuth = false
             } catch let e as UsageError {
                 lastError = e.description
+                if case .auth = e { needsAuth = true } else { needsAuth = false }
                 if case .http(429) = e { cooldownUntil = Date().addingTimeInterval(rateLimitCooldown) }
             } catch {
                 lastError = (error as CustomStringConvertible).description
+                needsAuth = false
             }
             renderBar()
             renderMenu()
@@ -150,14 +155,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let button = statusItem.button else { return }
 
         guard let snap = snapshot else {
-            // No data yet: show a placeholder, or a warning glyph if we failed.
+            // No data yet. Only flag auth problems loudly; rate-limit / network
+            // hiccups show a calm "…" since we retry automatically.
             button.image = nil
-            let text = lastError == nil ? "…" : "⚠"
-            button.attributedTitle = NSAttributedString(string: text, attributes: [
+            button.attributedTitle = NSAttributedString(string: needsAuth ? "⚠" : "…", attributes: [
                 .font: barFont,
-                .foregroundColor: lastError == nil ? NSColor.labelColor : NSColor.systemRed,
+                .foregroundColor: needsAuth ? NSColor.systemRed : NSColor.secondaryLabelColor,
             ])
-            button.toolTip = lastError
+            button.toolTip = lastError ?? "Loading…"
             return
         }
 
