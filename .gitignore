@@ -1,5 +1,6 @@
 # ───── Build output ─────
-build/                 # produced by ./build.sh (the .app bundle)
+# build/ holds the .app bundle produced by ./build.sh
+build/
 DerivedData/
 *.o
 *.swiftmodule
@@ -35,3 +36,6 @@ DerivedData/
 
 # ───── Claude Code (local, per-machine settings) ─────
 .claude/settings.local.json
+
+# ───── Local-only notes (personal / session context) ─────
+session-notes.md
