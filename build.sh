@@ -34,8 +34,20 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
     cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
-echo "==> Ad-hoc code signing…"
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+# Prefer a stable self-signed identity so the macOS "Always Allow" keychain
+# permission survives rebuilds (an ad-hoc signature's identity is its code hash,
+# which changes every build and re-triggers the password prompt). Detect via
+# find-certificate — the cert needn't be trusted for codesign to use it, and
+# find-identity would not list an untrusted self-signed cert.
+SIGN_IDENTITY="${CLAUDE_USAGE_SIGN_IDENTITY:-Claude Usage Self-Signed}"
+if security find-certificate -c "$SIGN_IDENTITY" >/dev/null 2>&1; then
+    echo "==> Code signing with '$SIGN_IDENTITY'…"
+    codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
+else
+    echo "==> Ad-hoc code signing (run ./tools/make_signing_cert.sh once so"
+    echo "    'Always Allow' persists across rebuilds)…"
+    codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
+fi
 
 echo "==> Built: $APP"
 
