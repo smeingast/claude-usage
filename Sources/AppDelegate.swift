@@ -95,7 +95,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(dockToggle)
 
         menu.addItem(.separator())
-        addAction(to: menu, title: "Quit Claude Usage", key: "q", action: #selector(NSApplication.terminate(_:)))
+        // Quit targets NSApp explicitly — terminate(_:) lives on NSApplication, not on
+        // us, so the generic addAction (target = self) would silently no-op the click.
+        let quit = NSMenuItem(title: "Quit Claude Usage",
+                              action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
 
         statusItem.menu = menu
     }
