@@ -137,7 +137,14 @@ final class UsageClient {
         if let rt = tr.refresh_token { updated.refreshToken = rt }
         let expiresIn = tr.expires_in ?? 3600
         updated.expiresAt = Date().timeIntervalSince1970 * 1000 + expiresIn * 1000
-        try? Keychain.writeCredentials(updated)   // non-fatal: in-memory token still works this cycle
+        // Non-fatal: the in-memory token still works this cycle. But don't swallow
+        // a failure silently — if the write-back keeps failing, Claude Code is left
+        // holding the now-rotated (dead) refresh token, so leave a breadcrumb.
+        do {
+            try Keychain.writeCredentials(updated)
+        } catch {
+            NSLog("ClaudeUsage: token write-back to Keychain failed: \(error)")
+        }
         return updated
     }
 }

@@ -40,10 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.font = barFont
         renderBar()                       // shows "…" until first fetch
         buildMenu()
+        renderMenu()                      // prime rows with "Loading…" before first fetch
 
         applyDockVisibility()             // honor saved preference (default: no Dock icon)
-        LoginItem.enableOnFirstLaunchIfNeeded()
-        LoginItem.syncIfEnabled()         // keep login-item path current if app moved
+        LoginItem.migrateLegacyAgentIfNeeded()   // upgrade pre-SMAppService installs in place
+        LoginItem.enableOnFirstLaunchIfNeeded()  // brand-new installs default to launch-at-login
         refreshLoginToggle()
 
         // Refresh when the Mac wakes from sleep so numbers aren't stale.
@@ -129,7 +130,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Timer / wake / menu-open: respect the gates (gap + 429 cooldown).
     @objc private func refreshNow() { performFetch(force: false) }
-    // The explicit "Refresh Now" menu item: always fetch, bypassing the gates.
+    // The explicit "Refresh Now" menu item: bypass the cooldown / min-gap rate
+    // limits (but still coalesce if a fetch is already in flight).
     @objc private func refreshNowClicked() { performFetch(force: true) }
 
     private func performFetch(force: Bool) {
@@ -151,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 lastError = e.description
                 if case .auth = e { needsAuth = true } else { needsAuth = false }
                 if case .http(429) = e { cooldownUntil = Date().addingTimeInterval(rateLimitCooldown) }
+            } catch let e as KeychainError {
+                // Not signed in (no Keychain item) is the most likely first-run
+                // state — flag it loudly. Transient Keychain hiccups stay calm.
+                lastError = e.description
+                if case .notFound = e { needsAuth = true } else { needsAuth = false }
             } catch {
                 lastError = (error as CustomStringConvertible).description
                 needsAuth = false
@@ -165,14 +172,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func renderBar() {
         guard let button = statusItem.button else { return }
 
-        guard let snap = snapshot else {
-            // No data yet. Only flag auth problems loudly; rate-limit / network
-            // hiccups show a calm "…" since we retry automatically.
+        // A rejected token wins over everything: surface the loud "⚠" even when we
+        // still hold a stale snapshot from before the token went bad — otherwise the
+        // bar would keep showing old numbers as if all were well.
+        if needsAuth {
             button.image = nil
             button.imagePosition = .noImage
-            button.attributedTitle = NSAttributedString(string: needsAuth ? "⚠" : "…", attributes: [
+            button.attributedTitle = NSAttributedString(string: "⚠", attributes: [
                 .font: barFont,
-                .foregroundColor: needsAuth ? NSColor.systemRed : NSColor.secondaryLabelColor,
+                .foregroundColor: NSColor.systemRed,
+            ])
+            button.toolTip = lastError ?? "Not authorized."
+            return
+        }
+
+        guard let snap = snapshot else {
+            // No data yet and no auth problem — a rate-limit / network hiccup or the
+            // first load. Show a calm "…" since we retry automatically.
+            button.image = nil
+            button.imagePosition = .noImage
+            button.attributedTitle = NSAttributedString(string: "…", attributes: [
+                .font: barFont,
+                .foregroundColor: NSColor.secondaryLabelColor,
             ])
             button.toolTip = lastError ?? "Loading…"
             return

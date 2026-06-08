@@ -27,6 +27,6 @@
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>NSHumanReadableCopyright</key>
-    <string>Reads the local Claude Code session token from the Keychain. No data leaves your Mac except requests to api.anthropic.com.</string>
+    <string>Reads the local Claude Code session token from the Keychain. No data leaves your Mac except requests to api.anthropic.com (usage) and console.anthropic.com (token refresh).</string>
 </dict>
 </plist>

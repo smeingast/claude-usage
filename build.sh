@@ -54,11 +54,10 @@ rm -rf "$APP"
 mkdir -p "$MACOS_DIR" "$APP/Contents/Resources"
 
 echo "==> Building $APP_NAME $VERSION (build $BUILD_NUM) — arm64, macOS $MIN_MACOS+…"
-# shellcheck disable=SC2046
 swiftc -O -wmo \
     -target "arm64-apple-macosx$MIN_MACOS" \
     -o "$MACOS_DIR/$EXE" \
-    $(ls "$ROOT"/Sources/*.swift)
+    "$ROOT"/Sources/*.swift
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 # Stamp the version so releases are reproducible without hand-editing the plist.

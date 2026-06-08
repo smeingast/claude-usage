@@ -1,68 +1,55 @@
 import Foundation
+import ServiceManagement
 
-/// "Launch at Login" implemented with a per-user LaunchAgent plist. This works
-/// across macOS versions and survives reboot. We only manage the plist file;
-/// launchd starts the app at the next login (we deliberately don't bootstrap a
-/// second copy while one is already running).
+/// "Launch at Login" via the modern ServiceManagement API (macOS 13+).
+///
+/// `SMAppService.mainApp` registers the app itself with launchd and tracks the
+/// bundle, so launch-at-login survives the app being moved and stays in sync with
+/// the System Settings › Login Items toggle. The old approach hand-wrote a
+/// LaunchAgent plist and inferred "enabled" from that file's mere existence —
+/// which went stale the moment the user flipped the switch in System Settings.
 enum LoginItem {
-    static let label = "eu.smeingast.claude-menubar-usage"
+    private static var service: SMAppService { .mainApp }
 
-    static var plistURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
-    }
-
+    /// True only when launch-at-login is active right now — not merely registered
+    /// but awaiting the user's approval in System Settings.
     static var isEnabled: Bool {
-        FileManager.default.fileExists(atPath: plistURL.path)
+        service.status == .enabled
     }
 
     static func setEnabled(_ enabled: Bool) {
-        enabled ? enable() : disable()
+        do {
+            if enabled {
+                guard service.status != .enabled else { return }
+                try service.register()
+            } else {
+                guard service.status == .enabled else { return }
+                try service.unregister()
+            }
+        } catch {
+            NSLog("ClaudeUsage: login-item \(enabled ? "register" : "unregister") failed: \(error)")
+        }
     }
 
-    /// If launch-at-login is enabled, rewrite the plist to point at the app's
-    /// current location. This self-heals after the .app is moved (e.g. from the
-    /// build folder to /Applications).
-    static func syncIfEnabled() {
-        if isEnabled { enable() }
-    }
-
-    /// On the very first launch, enable the login item once (per the user's
-    /// chosen default). After that, respect whatever the user toggles.
+    /// On the very first launch, turn launch-at-login on once (the app's default).
+    /// After that we respect whatever the user sets — here or in System Settings.
     static func enableOnFirstLaunchIfNeeded() {
         let key = "didApplyDefaultLoginItem"
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: key) else { return }
         defaults.set(true, forKey: key)
-        if !isEnabled { enable() }
+        setEnabled(true)
     }
 
-    private static func executablePath() -> String {
-        Bundle.main.executablePath ?? CommandLine.arguments[0]
-    }
-
-    private static func enable() {
-        let plist: [String: Any] = [
-            "Label": label,
-            "ProgramArguments": [executablePath()],
-            "RunAtLoad": true,
-            "KeepAlive": false,
-            "ProcessType": "Interactive",
-            "LimitLoadToSessionType": "Aqua",
-        ]
-        do {
-            try FileManager.default.createDirectory(
-                at: plistURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            let data = try PropertyListSerialization.data(
-                fromPropertyList: plist, format: .xml, options: 0)
-            try data.write(to: plistURL, options: .atomic)
-        } catch {
-            NSLog("ClaudeUsage: failed to write login item: \(error)")
-        }
-    }
-
-    private static func disable() {
-        try? FileManager.default.removeItem(at: plistURL)
+    /// One-time upgrade from pre-SMAppService versions, which wrote their own
+    /// LaunchAgent plist. If that file is present the user had launch-at-login on,
+    /// so re-register under the modern API and delete the stale plist — otherwise
+    /// launchd would keep a second, now-unmanaged copy starting at login.
+    static func migrateLegacyAgentIfNeeded() {
+        let legacy = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/eu.smeingast.claude-menubar-usage.plist")
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+        setEnabled(true)                                 // preserve the user's "on" state
+        try? FileManager.default.removeItem(at: legacy)  // drop the now-redundant plist
     }
 }

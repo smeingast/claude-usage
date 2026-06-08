@@ -60,16 +60,41 @@ enum Keychain {
         }
     }
 
-    /// Writes refreshed credentials back to the same item, preserving the JSON
-    /// shape Claude Code expects so the two clients stay in sync.
+    /// Writes refreshed token fields back into Claude Code's shared item without
+    /// disturbing anything else. We re-read the live JSON and patch only the three
+    /// fields a refresh rotates — so every other key Claude Code stores (scopes,
+    /// subscriptionType, and any field this struct doesn't model or that Anthropic
+    /// adds later) survives untouched. Encoding our narrow struct instead would
+    /// silently drop those keys on every refresh and corrupt Claude Code's item.
     static func writeCredentials(_ creds: OAuthCredentials) throws {
-        let data = try JSONEncoder().encode(CredentialsWrapper(claudeAiOauth: creds))
-        let query: [String: Any] = [
+        let readQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: true,
+        ]
+        var item: CFTypeRef?
+        let readStatus = SecItemCopyMatching(readQuery as CFDictionary, &item)
+        guard readStatus != errSecItemNotFound else { throw KeychainError.notFound }
+        guard readStatus == errSecSuccess else { throw KeychainError.osStatus(readStatus) }
+        guard let data = item as? Data,
+              var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any]
+        else { throw KeychainError.unexpectedData }
+
+        // Patch only the fields a token refresh changes; leave the rest verbatim.
+        oauth["accessToken"] = creds.accessToken
+        oauth["refreshToken"] = creds.refreshToken
+        oauth["expiresAt"] = creds.expiresAt
+        root["claudeAiOauth"] = oauth
+
+        let updated = try JSONSerialization.data(withJSONObject: root)
+        let writeQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
         ]
-        let attrs: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
+        let attrs: [String: Any] = [kSecValueData as String: updated]
+        let status = SecItemUpdate(writeQuery as CFDictionary, attrs as CFDictionary)
         guard status == errSecSuccess else { throw KeychainError.osStatus(status) }
     }
 }

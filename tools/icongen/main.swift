@@ -5,6 +5,9 @@ import Foundation
 
 // Renders a 1024×1024 app icon: two concentric "activity rings" (the 5-hour and
 // weekly limits) on a warm Claude-coral squircle. Output path is argv[1].
+//
+// Ring order matches the menu-bar glyph and README: outer = 5-hour (watched most,
+// gets the bold pure-white ring), inner = weekly (warm cream).
 
 let S: CGFloat = 1024
 let cs = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -49,8 +52,8 @@ func ring(_ r: CGFloat, width: CGFloat, fraction: CGFloat, fill: CGColor) {
     ctx.strokePath()
 }
 
-ring(258, width: 74, fraction: 0.66, fill: CGColor(red: 1, green: 1, blue: 1, alpha: 0.97))            // outer = weekly
-ring(150, width: 74, fraction: 0.40, fill: CGColor(red: 1, green: 0.93, blue: 0.86, alpha: 0.98))      // inner = 5-hour
+ring(258, width: 74, fraction: 0.66, fill: CGColor(red: 1, green: 1, blue: 1, alpha: 0.97))            // outer = 5-hour
+ring(150, width: 74, fraction: 0.40, fill: CGColor(red: 1, green: 0.93, blue: 0.86, alpha: 0.98))      // inner = weekly
 
 guard let image = ctx.makeImage() else { fatalError("image") }
 let out = URL(fileURLWithPath: CommandLine.arguments[1])

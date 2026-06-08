@@ -31,8 +31,7 @@ enum ColorMode: String, CaseIterable {
     }
 }
 
-/// Persisted user choices (UserDefaults). Defaults match the app's original look:
-/// percentages with orange/red thresholds.
+/// Persisted user choices (UserDefaults). Defaults: concentric rings, monochrome.
 enum Settings {
     private static let d = UserDefaults.standard
 
@@ -116,8 +115,10 @@ enum StatusRenderer {
         let template = (mode == .monochrome)
         let track = template ? NSColor(white: 0, alpha: 0.26) : NSColor.tertiaryLabelColor
 
-        // Concentric rings: a single glyph, exactly like the app icon
-        // (outer ring = weekly, inner ring = 5-hour).
+        // Concentric rings: a single activity-ring glyph in the app-icon style.
+        // Outer ring = 5-hour (the limit watched most), inner ring = weekly.
+        // (Note: the .icns app icon draws these reversed — outer = weekly; see
+        // tools/icongen/main.swift.)
         if style == .concentric {
             let d = height - 2
             let img = NSImage(size: NSSize(width: d, height: height), flipped: false) { _ in
@@ -125,7 +126,6 @@ enum StatusRenderer {
                 let lw = d * 0.125
                 let outerR = d / 2 - lw / 2 - 0.4
                 let innerR = outerR - lw - 1.0
-                // outer ring = 5-hour (watched most), inner ring = weekly
                 drawRing(center: c, radius: outerR, width: lw, value: five, mode: mode, template: template, track: track)
                 drawRing(center: c, radius: innerR, width: lw, value: week, mode: mode, template: template, track: track)
                 return true
