@@ -22,7 +22,7 @@ Dropdown:   5-hour limit — 14%  ·  resets 17:40
             Updated 14:26
             Refresh Now
             Display Style  ▸   Concentric rings · Percentages · Bars · ...
-            Color          ▸   Thresholds · Monochrome · Heatmap · Accent
+            Color          ▸   Claude · Thresholds · Monochrome · Heatmap · ...
             ✓ Launch at Login
               Show Dock Icon
             ─────────────
@@ -45,7 +45,8 @@ pie slices, or segments.
 
 The **Color** menu controls how usage maps to color:
 
-- **Monochrome** (default): adapts to the menu bar (light / dark)
+- **Claude** (default): Anthropic's coral, tuned for light / dark menu bars; red ≥ 90 %
+- **Monochrome**: adapts to the menu bar (light / dark)
 - **Thresholds**: normal, orange ≥ 70 %, red ≥ 90 %
 - **Heatmap**: green to red as usage climbs
 - **System accent**: your macOS accent color
@@ -110,7 +111,7 @@ never touch the repo.
 |-------|--------|
 | Data source | `GET /api/oauth/usage`: `five_hour.utilization`, `seven_day.utilization` (plus model-specific weekly caps when in use) |
 | Auth | OAuth token from Keychain service `Claude Code-credentials`, auto-refreshed via the stored refresh token |
-| Display | `NSStatusItem` rendered as text or a drawn glyph: 7 styles × 4 color modes |
+| Display | `NSStatusItem` rendered as text or a drawn glyph: 7 styles × 5 color modes |
 | Footprint | Menu-bar only (`LSUIElement`); optional Dock icon; launch-at-login via `SMAppService` |
 
 ## Project layout

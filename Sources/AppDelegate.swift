@@ -15,6 +15,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
 
+    // Light/dark menu-bar tracking. The colored glyph is a non-template NSImage, so
+    // AppKit does NOT re-run its drawing handler when the menu bar flips appearance —
+    // the dynamic coral would otherwise stay frozen on the old shade until the next
+    // fetch. We KVO the button's effectiveAppearance (more precise than NSApp's for a
+    // status item) and redraw when the light/dark bucket actually changes.
+    private var appearanceObservation: NSKeyValueObservation?
+    private var lastIsDark: Bool?
+
     private var isFetching = false
     private var lastFetchAt = Date.distantPast
     private var cooldownUntil = Date.distantPast
@@ -35,6 +43,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let barFont = NSFont.monospacedDigitSystemFont(
         ofSize: NSFont.systemFontSize, weight: .regular)
 
+    // Display-time date formatters. Built once and reused: DateFormatter creation is
+    // costly, and these run on every menu render. Safe to share — all use is on the
+    // main actor. Locale is captured at first use, fine for a login-launched menu-bar
+    // app (a mid-session locale change is picked up on the next launch).
+    private static let updatedFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "HH:mm"; return f
+    }()
+    private static let weeklyResetFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "EEE HH:mm"; return f
+    }()
+    private static let dailyResetFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = .current; f.dateFormat = "HH:mm"; return f
+    }()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.font = barFont
@@ -51,6 +73,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(systemDidWake),
             name: NSWorkspace.didWakeNotification, object: nil)
+
+        // Redraw the glyph when the menu bar switches light/dark (see appearance note
+        // above). KVO fires on the main thread; hop to the main actor to be safe.
+        appearanceObservation = statusItem.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            Task { @MainActor in self?.appearanceDidChange() }
+        }
 
         startTimer()
         refreshNow()
@@ -208,6 +236,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.toolTip = tooltip(snap)
     }
 
+    /// Re-render only when the menu bar actually crosses the light/dark boundary,
+    /// so vibrancy / contrast sub-changes don't trigger needless redraws.
+    private func appearanceDidChange() {
+        let isDark = statusItem.button?.effectiveAppearance
+            .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        guard lastIsDark != isDark else { return }
+        lastIsDark = isDark
+        renderBar()
+    }
+
     private func renderMenu() {
         if let snap = snapshot {
             fiveHourItem.title = row("5-hour limit", snap.fiveHour, weekly: false)
@@ -215,9 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             configureModelRow(opusItem, label: "Weekly · Opus", snap.sevenDayOpus)
             configureModelRow(sonnetItem, label: "Weekly · Sonnet", snap.sevenDaySonnet)
 
-            let f = DateFormatter(); f.dateFormat = "HH:mm"
             statusLine.title = lastError == nil
-                ? "Updated \(f.string(from: snap.fetchedAt))"
+                ? "Updated \(Self.updatedFormatter.string(from: snap.fetchedAt))"
                 : "Stale — \(lastError!)"
         } else {
             fiveHourItem.title = "5-hour limit — …"
@@ -316,9 +353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func resetText(_ date: Date?, weekly: Bool) -> String? {
         guard let date else { return nil }
-        let f = DateFormatter()
-        f.locale = .current
-        f.dateFormat = weekly ? "EEE HH:mm" : "HH:mm"
+        let f = weekly ? Self.weeklyResetFormatter : Self.dailyResetFormatter
         return "resets \(f.string(from: date))"
     }
 

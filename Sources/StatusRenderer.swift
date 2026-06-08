@@ -19,10 +19,11 @@ enum DisplayStyle: String, CaseIterable {
 
 /// How color is applied to the readout.
 enum ColorMode: String, CaseIterable {
-    case thresholds, monochrome, heatmap, accent
+    case claude, thresholds, monochrome, heatmap, accent
 
     var title: String {
         switch self {
+        case .claude:     return "Claude"
         case .thresholds: return "Thresholds (orange / red)"
         case .monochrome: return "Monochrome"
         case .heatmap:    return "Heatmap (green → red)"
@@ -31,7 +32,7 @@ enum ColorMode: String, CaseIterable {
     }
 }
 
-/// Persisted user choices (UserDefaults). Defaults: concentric rings, monochrome.
+/// Persisted user choices (UserDefaults). Defaults: concentric rings, Claude coral.
 enum Settings {
     private static let d = UserDefaults.standard
 
@@ -40,7 +41,7 @@ enum Settings {
         set { d.set(newValue.rawValue, forKey: "displayStyle") }
     }
     static var colorMode: ColorMode {
-        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .monochrome }
+        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .claude }
         set { d.set(newValue.rawValue, forKey: "colorMode") }
     }
 }
@@ -49,9 +50,21 @@ enum Settings {
 enum StatusRenderer {
     static let barHeight: CGFloat = 18
 
+    /// Anthropic's coral, tuned per menu-bar appearance: the app icon's warm
+    /// coral on a dark bar, its deeper clay on a light one, so it stays legible
+    /// on both. (The two tones are the icon gradient's endpoints; see
+    /// tools/icongen/main.swift.)
+    static let claudeCoral = NSColor(name: "ClaudeCoral") { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.886, green: 0.545, blue: 0.392, alpha: 1)   // warm coral
+            : NSColor(srgbRed: 0.745, green: 0.357, blue: 0.216, alpha: 1)   // deeper clay
+    }
+
     /// Color for a single utilization value under the chosen mode.
     static func color(_ v: Double, _ mode: ColorMode) -> NSColor {
         switch mode {
+        case .claude:     return v >= 90 ? .systemRed : claudeCoral
         case .monochrome: return .labelColor
         case .accent:     return .controlAccentColor
         case .thresholds:
