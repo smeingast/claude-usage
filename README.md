@@ -13,27 +13,16 @@ It reads the OAuth token Claude Code already stores in your login Keychain and
 polls the same usage data that powers Claude Code's `/usage` command. No servers,
 no accounts, no config files, no telemetry. It talks only to Anthropic.
 
-```
-Menu bar:   ◍   concentric rings (default), single ring, 14% / 4%, or bars
-
-Dropdown:   ◎  5-hour  14%   resets 17:40 · in 3h 12m
-                Weekly   4%   resets Sun 03:00 · in 6 days
-            [5h] [24h] [7d] [30d]              [Usage | Rate]
-            ▁▂▄▆█▇▅▃▁▁▂▂▃ ┊ ╌╌╌●   history + forecast (hover for values)
-            ─────────────
-            2 ACTIVE SESSIONS
-            ● claude-usage  Opus  ▂▂▂▂▂  125K
-            ● vircampype    Opus  ▂▂▂▂▂  535K
-            ─────────────
-            Updated 14:26
-            Refresh Now
-            Display Style  ▸   Concentric rings · Single ring · Percentages · ...
-            Color          ▸   Claude · Thresholds · Monochrome · Heatmap · ...
-            ✓ Launch at Login
-              Show Dock Icon
-            ─────────────
-            Quit
-```
+<p align="center">
+  <img src="assets/dropdown.png" width="355"
+       alt="The dropdown: 5-hour and weekly rings with reset times, a usage
+            graph with a dotted forecast line, and four active Claude Code
+            sessions with model chips and context bars">
+</p>
+<p align="center">
+  <sub>The dropdown: usage rings with reset times, history with the dotted
+  forecast, and the Claude Code sessions running on this Mac.</sub>
+</p>
 
 > **Unofficial.** Not affiliated with, or endorsed by, Anthropic. It relies on a
 > private endpoint that Claude Code uses internally: undocumented, and liable to
@@ -188,7 +177,7 @@ Sources/
 Resources/
   Info.plist           Bundle manifest (LSUIElement = menu-bar only)
   AppIcon.icns         App icon
-assets/                README images (icon, styles strip)
+assets/                README images (icon, dropdown screenshot, styles strip)
 tools/
   icongen/main.swift   Renders the icon
   make_icon.sh         Builds AppIcon.icns
