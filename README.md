@@ -18,8 +18,6 @@ Menu bar:   ◍   concentric rings (default), or 14% / 4%, single ring, bars, ..
 
 Dropdown:   ◎  5-hour  14%   resets 17:40 · in 3h 12m
                 Weekly   4%   resets Sun 03:00 · in 6 days
-            ●  At this pace the 5-hour window settles near 32%
-               before it resets at 17:40. Plenty of headroom.
             [5h] [24h] [7d] [30d]              [Usage | Rate]
             ▁▂▄▆█▇▅▃▁▁▂▂▃ ┊ ╌╌╌●   history + forecast (hover for values)
             ─────────────
@@ -43,11 +41,30 @@ Dropdown:   ◎  5-hour  14%   resets 17:40 · in 3h 12m
 > the Keychain and sends requests only to `api.anthropic.com` and
 > `console.anthropic.com`. Use at your own risk.
 
+## The dropdown
+
+The menu opens with the same two rings the menu bar shows, drawn large: the
+outer ring is the 5-hour window, the inner one the weekly window, with each
+percentage and its reset time in both absolute and relative form ("resets
+17:40 · in 3h 12m"). When the current pace would fill the 5-hour window before
+it resets, a fainter arc extends the outer ring to the projected value; it
+turns amber once the projection reaches 100%.
+
+Below the graph, the app lists live Claude Code sessions on this Mac: a
+busy/idle dot, the project name, the model family as a small chip, and the
+context fill as a thin bar next to the exact token count. The bar is scaled to
+the model family's advertised context window and is therefore approximate by
+design; for model families the app does not recognize, only the count is
+shown. Sessions are read from local files that Claude Code maintains for its
+own purposes, so this section may break silently when the CLI changes its
+internal layout.
+
 ## Display styles & color
 
-Pick how the two values look from the **Display Style** menu: concentric rings
-(default; outer = 5-hour, inner = weekly), percentages, bars, twin rings, gauges,
-pie slices, or segments.
+Pick how the readout looks from the **Display Style** menu: concentric rings
+(default; outer = 5-hour, inner = weekly), a single ring showing just the
+5-hour window, percentages, bars, twin rings, gauges, pie slices, or segments.
+The ring styles carry the forecast arc described above; the others stay static.
 
 ![Display styles](assets/styles.png)
 
@@ -61,15 +78,22 @@ The **Color** menu controls how usage maps to color:
 
 ## Usage history & forecast
 
-The dropdown draws an inline graph of past usage; hover it for exact values and
-timestamps. In **Usage** mode the right edge of the plot looks ahead to the
-5-hour reset: the last hour's burn rate is projected forward as a dotted run,
-turning amber (with a red dot at the crossing) when the pace would reach 100%
-before the reset — the same projection the banner sentence and the faint ghost
-arc on the menu-bar rings are built from. **Rate** mode shows how fast each
-window is filling. Ranges (last 5h / 24h / 7d / 30d) and the mode switch sit as
-pills directly above the graph. Samples are kept locally in a small append-only
-file and trimmed after about a month, so nothing leaves your Mac.
+The dropdown draws an inline graph of past usage; hovering it shows exact
+values and timestamps. In **Usage** mode with the 5h or 24h range, the time
+axis extends past "now" to the end of the current 5-hour window, and the last
+hour's fill rate is projected forward as a dotted line, drawn to the same time
+scale as the history so its slope can be compared directly. When the pace
+would reach 100% before the reset, the projection turns amber and a red dot
+marks the crossing; the arc on the menu-bar rings shows the same projection.
+The 7d and 30d ranges show history only, since five hours of look-ahead would
+collapse into a few pixels at those scales. **Rate** mode instead plots how
+fast each window was filling over time. Ranges and the mode switch sit as
+pills directly above the graph; clicking them keeps the menu open.
+
+The projection is a deliberately simple linear extrapolation of the last hour,
+measured only within the current 5-hour window, and is best read as a lower
+bound rather than a prediction. Samples are kept locally in a small
+append-only file and trimmed after about a month, so nothing leaves your Mac.
 
 ## Requirements
 
@@ -96,8 +120,8 @@ Needs the Swift toolchain (Xcode, or Command Line Tools via `xcode-select --inst
 ```
 
 The result is a self-contained `.app` that uses only system frameworks. It is
-deliberately light: one status item and a roughly 5-minute poll (plus an on-demand
-refresh when you open the menu) with rate-limit backoff.
+deliberately light: one status item and a roughly 5-minute poll (plus an
+on-demand refresh when you open the menu) with rate-limit backoff.
 
 <details>
 <summary><b>Maintainer: cutting a notarized release</b></summary>
@@ -108,7 +132,7 @@ hardened runtime automatically. To produce and zip the notarized, stapled `.app`
 ```sh
 ./tools/notarize_setup.sh   # one-time: store Apple notary credentials in the keychain
 ./build.sh --notarize       # sign, submit to Apple, staple, verify
-ditto -c -k --keepParent "build/Claude Usage.app" "build/Claude-Usage-v0.1.zip"
+ditto -c -k --keepParent "build/Claude Usage.app" "build/Claude-Usage-vX.Y.zip"
 ```
 
 `build.sh` does not bundle the versioned zip itself, hence the `ditto` step.
@@ -130,10 +154,11 @@ never touch the repo.
 | Piece | Detail |
 |-------|--------|
 | Data source | `GET /api/oauth/usage`: `five_hour.utilization`, `seven_day.utilization` (plus model-specific weekly caps when in use) |
-| Auth | OAuth token shared with Claude Code (Keychain service `Claude Code-credentials`), read silently and cached in memory. The token is refreshed only as a last resort and **never while any Claude Code process is running** — the refresh token is single-use, so spending it would log a live Claude Code out. While one runs, the app adopts whatever fresh token Claude Code writes |
-| Active sessions | Live Claude Code sessions **on this Mac** — project, model, status, and context tokens — read from `~/.claude/sessions/*.json` and each session's transcript tail. Local only, no network; undocumented internal state, so liable to change between CLI versions |
-| Usage history | Inline graph of past 5-hour and weekly utilization (or fill rate), spanning the last 5h to 30d. Sampled on each successful poll into an append-only file under Application Support, trimmed to about 32 days. Local only |
-| Display | `NSStatusItem` rendered as text or a drawn glyph: 8 styles × 5 color modes, with an optional forecast ghost arc on the ring styles |
+| Auth | OAuth token shared with Claude Code (Keychain service `Claude Code-credentials`), read silently and cached in memory. The token is refreshed only as a last resort and **never while any Claude Code process is running**: the refresh token is single-use, so spending it would log a live Claude Code out. While one runs, the app adopts whatever fresh token Claude Code writes |
+| Active sessions | Live Claude Code sessions on this Mac (project, model, status, context tokens), read from `~/.claude/sessions/*.json` and each session's transcript tail. Local only, no network; undocumented internal state, so liable to change between CLI versions |
+| Usage history | Past 5-hour and weekly utilization, sampled on each successful poll into an append-only file under Application Support and trimmed to about 32 days. Local only |
+| Forecast | The last hour's fill rate, measured within the current 5-hour window and projected linearly to its reset. Drives the dotted graph projection and the arc on the ring glyphs; computed locally from the sampled history |
+| Display | `NSStatusItem` rendered as text or a drawn glyph: 8 styles × 5 color modes |
 | Footprint | Menu-bar only (`LSUIElement`); optional Dock icon; launch-at-login via `SMAppService` |
 
 ## Project layout
@@ -143,8 +168,11 @@ Sources/
   main.swift           App entry + single-instance guard
   AppDelegate.swift    Status item, menu, polling
   StatusRenderer.swift Display styles + color modes (text / drawn glyphs)
-  Forecast.swift       Burn-rate projection + the panel's derived state
-  PanelViews.swift     Custom menu rows: header rings, banner, sessions, pills
+  Forecast.swift       Fill rate + projection to the 5-hour reset
+  PanelViews.swift     Custom menu rows: header rings, sessions, range pills
+  HistoryGraphView.swift  The history graph with forecast overlay and hover
+  HistoryStore.swift   Append-only local sample store
+  SessionsClient.swift Local session registry + transcript readers
   UsageClient.swift    Usage fetch + token refresh
   Keychain.swift       Read/write the shared Claude Code credentials
   LoginItem.swift      Launch-at-login via SMAppService
