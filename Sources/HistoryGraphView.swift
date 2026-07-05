@@ -143,13 +143,28 @@ final class HistoryGraphView: NSView {
 
         let t0 = m.now.addingTimeInterval(-m.range.duration)
 
-        // Forecast look-ahead (utilization mode only): the right 20% of the plot
-        // spans [now, fiveResetsAt] and carries a dotted projection; history
-        // compresses into the left 80%. Without a live forecast the history
-        // keeps the full width, exactly as before.
-        let fcActive = m.mode == .utilization && m.fiveNow != nil && m.projected != nil
+        // Forecast look-ahead (utilization mode only): the plot keeps ONE
+        // continuous time axis that extends past "now" to the 5-hour reset, so
+        // the projection's slope reads true against the history — a fixed-width
+        // zone would stretch or squeeze the look-ahead depending on the range.
+        // Proportionality also decides where the zone appears at all: in the
+        // 7d/30d views (and for an imminent reset) it would be a sliver a few
+        // points wide, so it only shows when it gets legible room.
+        var fcActive = m.mode == .utilization && m.fiveNow != nil && m.projected != nil
+            && (m.range == .last5h || m.range == .last24h)
             && (m.fiveResetsAt.map { $0 > m.now } ?? false)
-        let histWidth = fcActive ? plot.width * 0.8 : plot.width
+        var histWidth = plot.width
+        if fcActive, let reset = m.fiveResetsAt {
+            let resetIn = reset.timeIntervalSince(m.now)
+            let frac = CGFloat(m.range.duration / (m.range.duration + resetIn))
+            if plot.width * (1 - frac) >= 24 {
+                histWidth = plot.width * frac
+            } else {
+                fcActive = false        // too thin to read — draw plain history
+            }
+        } else {
+            fcActive = false
+        }
         let histMaxX = plot.minX + histWidth
         func X(_ t: Date) -> CGFloat {
             plot.minX + CGFloat(max(0, min(1, t.timeIntervalSince(t0) / m.range.duration))) * histWidth

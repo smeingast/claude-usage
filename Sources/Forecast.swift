@@ -1,4 +1,4 @@
-import AppKit
+import Foundation
 
 /// Burn-rate forecast for the 5-hour window: the last hour's positive rise,
 /// projected forward to the window's reset. Same lower-bound framing as
@@ -63,95 +63,5 @@ struct Forecast {
             crossTime = now.addingTimeInterval(resetsAt.timeIntervalSince(now) * frac)
         }
         return Forecast(ratePerHour: rate, projected: projected, crosses: crosses, crossTime: crossTime)
-    }
-}
-
-/// The panel's single derived state. Precedence: the auth states first, then
-/// rate-limited BEFORE data-stale (an active 429 cooldown also makes the data
-/// stale — the cause is more informative than the symptom), then usage states.
-///
-/// Note: tokenWait (our UsageError.stale — token expired, a Claude Code is
-/// alive, we politely wait) is deliberately distinct from dataStale (no fetch
-/// landed in a while, e.g. after sleep). The design handoff conflated them;
-/// they need opposite copy.
-enum PanelState: Equatable {
-    case signedOut
-    case tokenWait
-    case rateLimited(until: Date)
-    case dataStale(minutes: Int)
-    case red
-    case pace
-    case watch
-    case normal
-
-    struct Inputs {
-        var needsAuth: Bool
-        var tokenWait: Bool
-        var cooldownUntil: Date
-        var fetchedAt: Date?
-        var five: Double?
-        var forecast: Forecast?
-        var now: Date
-    }
-
-    static let staleAfter: TimeInterval = 12 * 60    // > 2 poll windows
-
-    static func derive(_ i: Inputs) -> PanelState {
-        if i.needsAuth { return .signedOut }
-        if i.tokenWait { return .tokenWait }
-        if i.cooldownUntil > i.now { return .rateLimited(until: i.cooldownUntil) }
-        if let at = i.fetchedAt, i.now.timeIntervalSince(at) > staleAfter {
-            return .dataStale(minutes: Int(i.now.timeIntervalSince(at) / 60))
-        }
-        if let five = i.five, five >= 90 { return .red }
-        if i.forecast?.crosses == true { return .pace }
-        if let five = i.five, five >= 70 { return .watch }
-        return .normal
-    }
-
-    /// The state dot's color. Hard rule from the design: red only for a real
-    /// ≥ 90%; amber only on forecast-flavored states; coral otherwise.
-    var dotColor: NSColor {
-        switch self {
-        case .red:                      return .systemRed
-        case .pace, .watch, .rateLimited: return .systemOrange
-        case .signedOut, .tokenWait, .dataStale: return .tertiaryLabelColor
-        case .normal:                   return StatusRenderer.claudeCoral
-        }
-    }
-
-    /// One banner sentence. `hm`/`rel` are display formatters supplied by the
-    /// caller so all time strings share the app's locale-aware formatting.
-    func message(five: Double?, forecast: Forecast?, resetsAt: Date?, now: Date,
-                 hm: (Date) -> String, rel: (TimeInterval) -> String) -> String {
-        func pct(_ v: Double) -> String { "\(Int(v.rounded()))%" }
-        switch self {
-        case .signedOut:
-            return "Signed out. Claude Code isn't sharing a token — open Claude Code, sign in, then reopen this menu."
-        case .tokenWait:
-            return "Waiting for Claude Code to refresh the sign-in token. Numbers may lag until it does."
-        case .rateLimited(let until):
-            return "Rate-limited by the server, backing off. Next check ~\(hm(until)); the reading can trail by a few minutes."
-        case .dataStale(let minutes):
-            return "Last reading \(minutes) min ago; your Mac may have slept. It refreshes on open and every ~5 min."
-        case .red:
-            guard let five, let resetsAt else { return "Red zone on the 5-hour window." }
-            return "Red zone — \(pct(max(0, 100 - five))) headroom left on the 5-hour window. Resets \(hm(resetsAt)), in \(rel(resetsAt.timeIntervalSince(now)))."
-        case .pace:
-            guard let cross = forecast?.crossTime, let resetsAt else { return "On pace to reach the 5-hour cap before it resets." }
-            return "At this pace you reach 100% around \(hm(cross)) — \(rel(resetsAt.timeIntervalSince(cross))) before the \(hm(resetsAt)) reset. Ease off to coast in."
-        case .watch:
-            guard let five else { return "Above 70% of the 5-hour window." }
-            if let projected = forecast?.projected, let resetsAt {
-                return "\(pct(five)) used, \(pct(100 - five)) to go. At this pace about \(pct(projected)) by the \(hm(resetsAt)) reset — still clear."
-            }
-            return "\(pct(five)) of the 5-hour window used."
-        case .normal:
-            guard let five else { return "Waiting for the first reading…" }
-            if let projected = forecast?.projected, let resetsAt, resetsAt > now {
-                return "At this pace the 5-hour window settles near \(pct(projected)) before it resets at \(hm(resetsAt)). Plenty of headroom."
-            }
-            return "\(pct(five)) of the 5-hour window used. Plenty of headroom."
-        }
     }
 }

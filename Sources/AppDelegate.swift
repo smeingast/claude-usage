@@ -30,15 +30,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var snapshot: UsageSnapshot?
     private var lastError: String?
     private var needsAuth = false       // true only when the token is rejected
-    private var tokenWaiting = false    // UsageError.stale: waiting for Claude Code's refresh
     private var forecast: Forecast?     // recomputed on every panel render
 
     // Panel rows (custom views) and the remaining text rows.
     private let headerView = PanelHeaderView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
                                                            height: PanelHeaderView.height))
     private let headerItem = NSMenuItem()
-    private let bannerView = ForecastBannerView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width, height: 46))
-    private let bannerItem = NSMenuItem()
     private let pillsView = RangeModePillsView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
                                                              height: RangeModePillsView.height))
     private let pillsItem = NSMenuItem()
@@ -153,14 +150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false       // keep info rows full-color & readable
         menu.delegate = self
 
-        // The instrument panel: header (rings + numbers), forecast banner, and
-        // the model-specific weekly text rows (shown only when in use).
+        // The instrument panel: header (rings + numbers) and the
+        // model-specific weekly text rows (shown only when in use).
         headerItem.isEnabled = false
         headerItem.view = headerView
         menu.addItem(headerItem)
-        bannerItem.isEnabled = false
-        bannerItem.view = bannerView
-        menu.addItem(bannerItem)
         for item in [opusItem, sonnetItem] {
             item.isEnabled = false
             item.isHidden = true
@@ -299,23 +293,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                   isClaudeAlive: { sessions.anyClaudeAlive() })
                 lastError = nil
                 needsAuth = false
-                tokenWaiting = false
                 recordHistory(snapshot)
             } catch let e as UsageError {
                 lastError = e.description
                 if case .auth = e { needsAuth = true } else { needsAuth = false }
-                if case .stale = e { tokenWaiting = true } else { tokenWaiting = false }
                 if case .http(429) = e { cooldownUntil = Date().addingTimeInterval(rateLimitCooldown) }
             } catch let e as KeychainError {
                 // Not signed in (no Keychain item) is the most likely first-run
                 // state — flag it loudly. Transient Keychain hiccups stay calm.
                 lastError = e.description
-                tokenWaiting = false
                 if case .notFound = e { needsAuth = true } else { needsAuth = false }
             } catch {
                 lastError = (error as CustomStringConvertible).description
                 needsAuth = false
-                tokenWaiting = false
             }
             renderMenu()    // before the bar: the panel render refreshes the forecast
             renderBar()
@@ -401,10 +391,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let resetsAt = snapshot?.fiveHour?.resetsAt
         forecast = Forecast.compute(samples: history, now: now, current: five, resetsAt: resetsAt)
 
-        let state = PanelState.derive(.init(
-            needsAuth: needsAuth, tokenWait: tokenWaiting, cooldownUntil: cooldownUntil,
-            fetchedAt: snapshot?.fetchedAt, five: five, forecast: forecast, now: now))
-
         headerView.configure(PanelHeaderModel(
             five: five,
             week: snapshot?.sevenDay?.utilization,
@@ -415,24 +401,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             weekResetAbs: snapshot?.sevenDay?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
             weekResetRel: snapshot?.sevenDay?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
             signedOut: needsAuth))
-
-        let message: String
-        if snapshot == nil && !needsAuth {
-            message = lastError ?? "Waiting for the first reading…"
-        } else {
-            message = state.message(five: five, forecast: forecast, resetsAt: resetsAt, now: now,
-                                    hm: { Self.dailyResetFormatter.string(from: $0) },
-                                    rel: { Self.rel($0) })
-        }
-        // Known residual: if a fetch lands while the menu is OPEN and the new
-        // message crosses a line-count boundary, NSMenu does not re-layout a
-        // custom view's changed height until the next open (same class of
-        // limitation as un-hiding rows mid-tracking). menuNeedsUpdate re-runs
-        // this before every open, so the layout is always correct on open.
-        bannerView.setFrameSize(NSSize(width: bannerView.frame.width,
-                                       height: ForecastBannerView.height(for: message,
-                                                                         width: PanelStyle.width)))
-        bannerView.configure(text: message, dotColor: state.dotColor)
 
         if let snap = snapshot {
             configureModelRow(opusItem, label: "Weekly · Opus", snap.sevenDayOpus)
