@@ -14,7 +14,7 @@ polls the same usage data that powers Claude Code's `/usage` command. No servers
 no accounts, no config files, no telemetry. It talks only to Anthropic.
 
 ```
-Menu bar:   ◍   concentric rings (default), or 14% / 4%, single ring, bars, ...
+Menu bar:   ◍   concentric rings (default), single ring, 14% / 4%, or bars
 
 Dropdown:   ◎  5-hour  14%   resets 17:40 · in 3h 12m
                 Weekly   4%   resets Sun 03:00 · in 6 days
@@ -63,8 +63,12 @@ internal layout.
 
 Pick how the readout looks from the **Display Style** menu: concentric rings
 (default; outer = 5-hour, inner = weekly), a single ring showing just the
-5-hour window, percentages, bars, twin rings, gauges, pie slices, or segments.
-The ring styles carry the forecast arc described above; the others stay static.
+5-hour window, percentages, or bars. The ring styles carry the forecast arc
+described above; percentages and bars stay static. Earlier versions offered
+four more styles (twin rings, gauges, pie slices, segments); these were
+retired in v0.6 since they either duplicated the concentric information at
+twice the width or lost resolution at menu-bar size, and a saved choice of a
+retired style now falls back to concentric rings.
 
 ![Display styles](assets/styles.png)
 
@@ -158,7 +162,7 @@ never touch the repo.
 | Active sessions | Live Claude Code sessions on this Mac (project, model, status, context tokens), read from `~/.claude/sessions/*.json` and each session's transcript tail. Local only, no network; undocumented internal state, so liable to change between CLI versions |
 | Usage history | Past 5-hour and weekly utilization, sampled on each successful poll into an append-only file under Application Support and trimmed to about 32 days. Local only |
 | Forecast | The last hour's fill rate, measured within the current 5-hour window and projected linearly to its reset. Drives the dotted graph projection and the arc on the ring glyphs; computed locally from the sampled history |
-| Display | `NSStatusItem` rendered as text or a drawn glyph: 8 styles × 5 color modes |
+| Display | `NSStatusItem` rendered as text or a drawn glyph: 4 styles × 5 color modes |
 | Footprint | Menu-bar only (`LSUIElement`); optional Dock icon; launch-at-login via `SMAppService` |
 
 ## Project layout

@@ -1,8 +1,15 @@
 import AppKit
 
 /// How the two utilization values are drawn in the menu bar.
+/// The four styles that survived the v0.5 trim: concentric is the identity,
+/// single is its near-term-only variant, bars read fastest, percentages give
+/// the exact digits. Twin rings, gauges, pie, and segments were retired — they
+/// duplicated the concentric information at twice the width or lost resolution
+/// at menu-bar size. A saved retired value no longer parses and falls back to
+/// `.concentric` via the `Settings.style` getter, which is the intended
+/// migration.
 enum DisplayStyle: String, CaseIterable {
-    case concentric, single, percentages, bars, rings, arcs, pie, pips
+    case concentric, single, percentages, bars
 
     var title: String {
         switch self {
@@ -10,10 +17,6 @@ enum DisplayStyle: String, CaseIterable {
         case .single:      return "Single ring (5-hour)"
         case .percentages: return "Percentages"
         case .bars:        return "Bars"
-        case .rings:       return "Twin rings"
-        case .arcs:        return "Gauges"
-        case .pie:         return "Pie slices"
-        case .pips:        return "Segments"
         }
     }
 }
@@ -239,13 +242,10 @@ enum StatusRenderer {
             return img
         }
 
+        // Bars: the only remaining style drawn as a side-by-side pair
+        // (percentages is text and never reaches this path).
         let values = [five ?? 0, week ?? 0]
-        let (gaugeW, gap): (CGFloat, CGFloat)
-        switch style {
-        case .bars, .pips:        (gaugeW, gap) = (7, 5)
-        case .rings, .arcs, .pie: (gaugeW, gap) = (height - 2, 4)
-        case .percentages, .concentric, .single: (gaugeW, gap) = (0, 0)
-        }
+        let gaugeW: CGFloat = 7, gap: CGFloat = 5
         let size = NSSize(width: gaugeW * 2 + gap, height: height)
 
         let img = NSImage(size: size, flipped: false) { _ in
@@ -253,7 +253,7 @@ enum StatusRenderer {
                 let x = CGFloat(i) * (gaugeW + gap)
                 let rect = CGRect(x: x, y: 1, width: gaugeW, height: height - 2)
                 let fill = template ? NSColor.black : color(v, mode)
-                drawGauge(style, value: CGFloat(min(max(v / 100, 0), 1)), in: rect, fill: fill, track: track)
+                drawBar(value: CGFloat(min(max(v / 100, 0), 1)), in: rect, fill: fill, track: track)
             }
             return true
         }
@@ -272,68 +272,17 @@ enum StatusRenderer {
         }
     }
 
-    private static func drawGauge(_ style: DisplayStyle, value: CGFloat, in rect: CGRect,
-                                  fill: NSColor, track: NSColor) {
-        switch style {
-        case .percentages, .concentric, .single:   // handled elsewhere (text / single glyph)
-            break
-
-        case .bars:
-            let rad = rect.width / 2
-            track.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: rad, yRadius: rad).fill()
-            let h = rect.height * value
-            if h > 0.5 {
-                let fr = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: h)
-                let r = min(rect.width / 2, h / 2)
-                fill.setFill()
-                NSBezierPath(roundedRect: fr, xRadius: r, yRadius: r).fill()
-            }
-
-        case .pips:
-            let n = 5
-            let segGap: CGFloat = 1.6
-            let segH = (rect.height - segGap * CGFloat(n - 1)) / CGFloat(n)
-            let lit = Int((value * CGFloat(n)).rounded())
-            for k in 0..<n {
-                let y = rect.minY + CGFloat(k) * (segH + segGap)
-                let r = CGRect(x: rect.minX, y: y, width: rect.width, height: segH)
-                (k < lit ? fill : track).setFill()
-                NSBezierPath(roundedRect: r, xRadius: 1.5, yRadius: 1.5).fill()
-            }
-
-        case .rings:
-            let lw = rect.width * 0.27
-            let radius = (min(rect.width, rect.height) - lw) / 2
-            let c = CGPoint(x: rect.midX, y: rect.midY)
-            stroke(arcCenter: c, radius: radius, from: 0, to: 360, clockwise: false, width: lw, color: track)
-            if value > 0 {
-                stroke(arcCenter: c, radius: radius, from: 90, to: 90 - 360 * value, clockwise: true, width: lw, color: fill)
-            }
-
-        case .arcs:
-            let lw = rect.width * 0.24
-            let radius = (min(rect.width, rect.height) - lw) / 2
-            let c = CGPoint(x: rect.midX, y: rect.midY - rect.height * 0.06)
-            // 270° gauge, open at the bottom
-            stroke(arcCenter: c, radius: radius, from: -45, to: 225, clockwise: false, width: lw, color: track)
-            if value > 0 {
-                stroke(arcCenter: c, radius: radius, from: 225, to: 225 - 270 * value, clockwise: true, width: lw, color: fill)
-            }
-
-        case .pie:
-            let radius = min(rect.width, rect.height) / 2 - 0.5
-            let c = CGPoint(x: rect.midX, y: rect.midY)
-            track.setFill()
-            NSBezierPath(ovalIn: CGRect(x: c.x - radius, y: c.y - radius, width: radius * 2, height: radius * 2)).fill()
-            if value > 0 {
-                let wedge = NSBezierPath()
-                wedge.move(to: c)
-                wedge.appendArc(withCenter: c, radius: radius, startAngle: 90, endAngle: 90 - 360 * value, clockwise: true)
-                wedge.close()
-                fill.setFill()
-                wedge.fill()
-            }
+    /// One rounded fuel bar: faint full track, filled from the bottom.
+    private static func drawBar(value: CGFloat, in rect: CGRect, fill: NSColor, track: NSColor) {
+        let rad = rect.width / 2
+        track.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: rad, yRadius: rad).fill()
+        let h = rect.height * value
+        if h > 0.5 {
+            let fr = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: h)
+            let r = min(rect.width / 2, h / 2)
+            fill.setFill()
+            NSBezierPath(roundedRect: fr, xRadius: r, yRadius: r).fill()
         }
     }
 
