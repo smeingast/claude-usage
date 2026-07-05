@@ -40,3 +40,6 @@ DerivedData/
 # ───── Local-only notes (personal / session context) ─────
 session-notes.md
 important-notes.md
+
+# ───── Design references (local only — contains real usage telemetry) ─────
+design/
