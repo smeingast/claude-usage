@@ -250,48 +250,23 @@ struct SessionsClient: Sendable {
         return nil
     }
 
-    /// Scan the transcript backward from EOF for the last main-chain assistant
-    /// message carrying a `usage` block. Reads fixed 256 KB windows from high to
-    /// low offsets, carrying a straddling line fragment across the boundary, so
-    /// every byte is read at most once and complete lines are never dropped. The
-    /// target sits a few KB from EOF in practice, so this almost always returns on
-    /// the first window; a `scanCap` bounds the pathological whole-file walk.
-    private func lastAssistantUsageEntry(_ url: URL) -> [String: Any]? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-        defer { try? handle.close() }
-        guard let end = try? handle.seekToEnd() else { return nil }
-
-        let newline: UInt8 = 0x0A
-        let chunk: UInt64 = 256 * 1024
-        let scanCap: UInt64 = 32 * 1024 * 1024   // safety bound for a pathological tail
-        var pos = end
-        var carry = Data()                       // a line's tail, awaiting its head lower down
-
-        while pos > 0 {
-            if end - pos > scanCap { return nil }
-            let readLen = min(chunk, pos)
-            let start = pos - readLen
-            guard (try? handle.seek(toOffset: start)) != nil,
-                  let buf = try? handle.read(upToCount: Int(readLen)) else { return nil }
-
-            var data = buf
-            if !carry.isEmpty { data.append(carry) }
-
-            if let nl = data.firstIndex(of: newline) {
-                // Everything after the first newline is complete lines (the appended
-                // carry completes the highest one); scan them newest-first.
-                let after = Data(data[data.index(after: nl)...])
-                for line in after.split(separator: newline, omittingEmptySubsequences: true).reversed() {
-                    if let obj = assistantUsageEntry(Data(line)) { return obj }
-                }
-                carry = Data(data[..<nl])        // head fragment continues into the next window
-            } else {
-                carry = data                     // no newline yet — keep accumulating downward
-            }
-            pos = start
+    /// The last main-chain assistant message carrying a `usage` block, found by
+    /// scanning the transcript backward from EOF (see `JSONLBackscan`). The scan's
+    /// `match` hook is the existing pre-filter-plus-validation, so the selected
+    /// line, and therefore the result, is identical to the pre-refactor inline
+    /// walk. The matched object is captured as the predicate parses it, so no line
+    /// is parsed twice.
+    ///
+    /// Internal (not private) so the scanner-parity test can drive it against a
+    /// fixture transcript; unused outside this type in the app build.
+    func lastAssistantUsageEntry(_ url: URL) -> [String: Any]? {
+        var entry: [String: Any]?
+        _ = JSONLBackscan.lastLineBackward(url: url) { line in
+            guard let obj = assistantUsageEntry(line) else { return false }
+            entry = obj
+            return true
         }
-        // Reached byte 0: the remaining carry is the file's first (complete) line.
-        return carry.isEmpty ? nil : assistantUsageEntry(carry)
+        return entry
     }
 
     /// Parse one JSONL line; return it only if it is a main-chain assistant message

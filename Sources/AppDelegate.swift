@@ -27,7 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastFetchAt = Date.distantPast
     private var cooldownUntil = Date.distantPast
 
-    private var snapshot: UsageSnapshot?
+    private var snapshot: ProviderUsageSnapshot?
     private var lastError: String?
     private var needsAuth = false       // true only when the token is rejected
     private var forecast: Forecast?     // recomputed on every panel render
@@ -289,8 +289,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let sessions = sessionsClient
             let claudeAlive = await Task.detached(priority: .utility) { sessions.anyClaudeAlive() }.value
             do {
-                snapshot = try await client.fetch(allowRefresh: !claudeAlive,
-                                                  isClaudeAlive: { sessions.anyClaudeAlive() })
+                let usage = try await client.fetch(allowRefresh: !claudeAlive,
+                                                   isClaudeAlive: { sessions.anyClaudeAlive() })
+                snapshot = ProviderUsageSnapshot(claude: usage)
                 lastError = nil
                 needsAuth = false
                 recordHistory(snapshot)
@@ -366,13 +367,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         StatusRenderer.apply(to: button,
-                             five: snap.fiveHour?.utilization,
-                             week: snap.sevenDay?.utilization,
+                             five: snap.primary?.utilization,
+                             week: snap.secondary?.utilization,
                              style: Settings.style,
                              color: Settings.colorMode,
                              font: barFont,
                              projected: forecast?.projected)
-        button.toolTip = tooltip(snap)
+        button.toolTip = Self.tooltipText(snap, lastError: lastError)
     }
 
     /// Re-render only when the menu bar actually crosses the light/dark boundary,
@@ -387,30 +388,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func renderMenu() {
         let now = Date()
-        let five = snapshot?.fiveHour?.utilization
-        let resetsAt = snapshot?.fiveHour?.resetsAt
+        let five = snapshot?.primary?.utilization
+        let resetsAt = snapshot?.primary?.resetsAt
         forecast = Forecast.compute(samples: history, now: now, current: five, resetsAt: resetsAt)
 
         headerView.configure(PanelHeaderModel(
             five: five,
-            week: snapshot?.sevenDay?.utilization,
+            week: snapshot?.secondary?.utilization,
             projected: forecast?.projected,
             fiveIsRed: (five ?? 0) >= 90,
             fiveResetAbs: resetsAt.map { "resets \(Self.dailyResetFormatter.string(from: $0))" },
             fiveResetRel: resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
-            weekResetAbs: snapshot?.sevenDay?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
-            weekResetRel: snapshot?.sevenDay?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
+            weekResetAbs: snapshot?.secondary?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
+            weekResetRel: snapshot?.secondary?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
             signedOut: needsAuth))
 
         if let snap = snapshot {
-            configureModelRow(opusItem, label: "Weekly · Opus", snap.sevenDayOpus)
-            configureModelRow(sonnetItem, label: "Weekly · Sonnet", snap.sevenDaySonnet)
-            statusLine.title = lastError == nil
-                ? "Updated \(Self.updatedFormatter.string(from: snap.fetchedAt))"
-                : "Stale — \(lastError!)"
-        } else {
-            statusLine.title = lastError ?? "Loading…"
+            configureModelRow(opusItem, label: "Weekly · Opus", snap.extra("opus"))
+            configureModelRow(sonnetItem, label: "Weekly · Sonnet", snap.extra("sonnet"))
         }
+        statusLine.title = Self.statusLineText(fetchedAt: snapshot?.fetchedAt,
+                                               lastError: lastError, formatter: Self.updatedFormatter)
         applyGraphData()        // refresh the graph row when a fetch lands
     }
 
@@ -423,20 +421,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Model-specific weekly caps only appear when actually in use.
-    private func configureModelRow(_ item: NSMenuItem, label: String, _ window: LimitWindow?) {
-        if let window, window.utilization > 0 {
+    private func configureModelRow(_ item: NSMenuItem, label: String, _ window: UsageWindow?) {
+        if Self.modelRowVisible(window) {
             item.isHidden = false
-            item.title = row(label, window, weekly: true)
+            item.title = Self.modelRowText(label, window, resetFormatter: Self.weeklyResetFormatter)
         } else {
             item.isHidden = true
         }
-    }
-
-    private func row(_ label: String, _ window: LimitWindow?, weekly: Bool) -> String {
-        guard let window else { return "\(label) — —" }
-        var s = "\(label) — \(percent(window.utilization))"
-        if let reset = resetText(window.resetsAt, weekly: weekly) { s += "  ·  \(reset)" }
-        return s
     }
 
     /// Fill the pre-allocated session rows in place (view content / isHidden
@@ -544,14 +535,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Record a sample from a successful fetch: throttle to the ~5-min grid (Refresh
     /// Now bypasses the fetch gate), append in memory + persist off-main.
-    private func recordHistory(_ snap: UsageSnapshot?) {
+    private func recordHistory(_ snap: ProviderUsageSnapshot?) {
         guard let snap else { return }
-        let sample = HistorySample(
-            t: snap.fetchedAt,
-            five: snap.fiveHour?.utilization,
-            week: snap.sevenDay?.utilization,
-            fiveResetsAt: snap.fiveHour?.resetsAt,
-            weekResetsAt: snap.sevenDay?.resetsAt)
+        let sample = Self.historySample(from: snap)
         guard sample.t.timeIntervalSince(lastHistoryAppendAt) >= minSampleGap else { return }
         lastHistoryAppendAt = sample.t
         history.append(sample)
@@ -579,9 +565,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             range: Settings.historyRange,
             colorMode: Settings.colorMode,
             now: now,
-            fiveNow: snapshot?.fiveHour?.utilization,
-            weekNow: snapshot?.sevenDay?.utilization,
-            fiveResetsAt: snapshot?.fiveHour?.resetsAt,
+            fiveNow: snapshot?.primary?.utilization,
+            weekNow: snapshot?.secondary?.utilization,
+            fiveResetsAt: snapshot?.primary?.resetsAt,
             projected: forecast?.projected,
             crosses: forecast?.crosses ?? false,
             crossTime: forecast?.crossTime))
@@ -602,24 +588,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - Formatting helpers
+    // MARK: - Pure string builders
+    //
+    // Extracted from the render methods into nonisolated static helpers so the
+    // golden tests can assert byte-identical output without a live menu. Each
+    // returns exactly what the pre-refactor instance method did; the only change is
+    // that the formatter and `lastError` arrive as parameters rather than read off
+    // `self`, which also keeps them provably pure.
 
-    private func percent(_ v: Double?) -> String {
+    /// Rounded integer percent, em-dash for a missing value.
+    nonisolated static func percent(_ v: Double?) -> String {
         guard let v else { return "—" }
         return "\(Int(v.rounded()))%"
     }
 
-    private func resetText(_ date: Date?, weekly: Bool) -> String? {
+    /// "resets <time>" for a window's reset instant, nil when there is none. The
+    /// caller supplies the formatter (weekly rows use the weekday-bearing one).
+    nonisolated static func resetText(_ date: Date?, formatter: DateFormatter) -> String? {
         guard let date else { return nil }
-        let f = weekly ? Self.weeklyResetFormatter : Self.dailyResetFormatter
-        return "resets \(f.string(from: date))"
+        return "resets \(formatter.string(from: date))"
     }
 
-    private func tooltip(_ snap: UsageSnapshot) -> String {
+    /// One weekly model-cap row, e.g. "Weekly · Opus — 42%  ·  resets Sun 03:00".
+    nonisolated static func modelRowText(_ label: String, _ window: UsageWindow?,
+                                         resetFormatter: DateFormatter) -> String {
+        guard let window else { return "\(label) — —" }
+        var s = "\(label) — \(percent(window.utilization))"
+        if let reset = resetText(window.resetsAt, formatter: resetFormatter) { s += "  ·  \(reset)" }
+        return s
+    }
+
+    /// A model-cap row is shown only when that model is actually in use.
+    nonisolated static func modelRowVisible(_ window: UsageWindow?) -> Bool {
+        guard let window else { return false }
+        return window.utilization > 0
+    }
+
+    /// The bar's tooltip: the title, the present headline windows, and any error.
+    nonisolated static func tooltipText(_ snap: ProviderUsageSnapshot, lastError: String?) -> String {
         var lines = ["Claude usage"]
-        if let f = snap.fiveHour { lines.append("5-hour: \(percent(f.utilization))") }
-        if let w = snap.sevenDay { lines.append("Weekly: \(percent(w.utilization))") }
+        if let f = snap.primary { lines.append("5-hour: \(percent(f.utilization))") }
+        if let w = snap.secondary { lines.append("Weekly: \(percent(w.utilization))") }
         if let e = lastError { lines.append("⚠ \(e)") }
         return lines.joined(separator: "\n")
+    }
+
+    /// The status row text. `fetchedAt == nil` means no snapshot yet (the loading /
+    /// error branch); a snapshot present shows "Updated <time>", or "Stale — …"
+    /// when a later poll failed but the previous numbers still stand.
+    nonisolated static func statusLineText(fetchedAt: Date?, lastError: String?,
+                                           formatter: DateFormatter) -> String {
+        guard let fetchedAt else { return lastError ?? "Loading…" }
+        return lastError == nil
+            ? "Updated \(formatter.string(from: fetchedAt))"
+            : "Stale — \(lastError!)"
+    }
+
+    /// The history sample a successful poll records: the two headline utilizations
+    /// and their reset instants at the fetch time. Optionals stay genuine gaps.
+    nonisolated static func historySample(from snap: ProviderUsageSnapshot) -> HistorySample {
+        HistorySample(
+            t: snap.fetchedAt,
+            five: snap.primary?.utilization,
+            week: snap.secondary?.utilization,
+            fiveResetsAt: snap.primary?.resetsAt,
+            weekResetsAt: snap.secondary?.resetsAt)
     }
 }
