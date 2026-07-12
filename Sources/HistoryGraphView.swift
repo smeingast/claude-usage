@@ -234,7 +234,7 @@ final class HistoryGraphView: NSView {
             drawBars(fiveBars, x: X, y: Y, baseY: plot.minY, color: fiveColor, width: 1.5)
         }
 
-        drawReadout(m, in: b, leftAligned: fcActive, plot: plot)
+        drawReadout(m, in: b, plot: plot)
         drawTimeAxis(m, plot: plot, t0: t0, fcActive: fcActive, histMaxX: histMaxX)
         drawCodexIdleLegends(m, plot: plot)
     }
@@ -405,8 +405,7 @@ final class HistoryGraphView: NSView {
         color.setStroke(); p.stroke()
     }
 
-    private func drawReadout(_ m: GraphData, in rect: CGRect,
-                             leftAligned: Bool = false, plot: CGRect = .zero) {
+    private func drawReadout(_ m: GraphData, in rect: CGRect, plot: CGRect) {
         let f = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         let s = NSMutableAttributedString()
         // Provider-name prefix (amendment 26): with two stacked cards, the readout
@@ -430,11 +429,14 @@ final class HistoryGraphView: NSView {
         s.append(NSAttributedString(string: "   ", attributes: [.font: f]))
         add("wk ", m.weekNow)
         let sz = s.size()
-        // With the forecast zone active, the top-right corner belongs to the
-        // projection (the 100%-crossing dot lands exactly there) — tuck the
-        // readout into the top-left of the plot instead.
-        let x = leftAligned ? plot.minX + 4 : rect.maxX - sz.width - 8
-        s.draw(at: CGPoint(x: x, y: rect.maxY - sz.height - 1))
+        // Always top-LEFT (amendment 26a, Stefan-ruled). v0.8 kept the readout
+        // top-right and moved it left only while the forecast zone owned the right
+        // edge; with stacked cards that split the titles across opposite sides. The
+        // left spot also stays clear of the projection's 100%-crossing dot, which
+        // lands in the top-right corner when a forecast is active. This is the one
+        // deliberate deviation from amendment 7's literal-v0.8 pixels, applied in
+        // Claude-only mode too so the readout never jumps between opens.
+        s.draw(at: CGPoint(x: plot.minX + 4, y: rect.maxY - sz.height - 1))
     }
 
     private func drawTimeAxis(_ m: GraphData, plot: CGRect, t0: Date,
