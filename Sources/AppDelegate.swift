@@ -32,6 +32,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var needsAuth = false       // true only when the token is rejected
     private var forecast: Forecast?     // recomputed on every panel render
 
+    // Two-provider derived state (package 4b). `twoProvider` and `graphProvider` are
+    // resolved AT MENU OPEN (NSMenu can't restructure rows while up); the derived
+    // states and forecasts are recomputed on every render so the copy stays fresh.
+    // In Claude-only mode `twoProvider` is false and every field below is inert, so
+    // the panel/bar/graph paths are the literal v0.8 behavior (amendment 7).
+    private var twoProvider = false
+    private var graphProvider: UsageProviderKind = .claude
+    private var claudeDerived: ClaudeDerived?
+    private var codexDerived: CodexDerived?
+    private var codexForecast: Forecast?
+    // True once openResolve has run for the CURRENT tracking session; cleared in
+    // menuDidClose. menuNeedsUpdate re-enters on every menu-tracking tick (the
+    // HistoryGraphView signature comment documents this), and openResolve must not
+    // re-run then: it would reset graphProvider (stomping a mid-open graph-pill
+    // selection) and re-resize the banner/strip rows, whose structure and heights
+    // are per-open (amendment 1).
+    private var openResolved = false
+    private static let codexRootPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".codex", isDirectory: true).path
+
     // Panel rows (custom views) and the remaining text rows.
     private let headerView = PanelHeaderView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
                                                            height: PanelHeaderView.height))
@@ -41,6 +61,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let pillsItem = NSMenuItem()
     private let opusItem = NSMenuItem()
     private let sonnetItem = NSMenuItem()
+
+    // Two-provider panel chrome (package 4b): a provider tag row ABOVE the instrument,
+    // an honesty banner BELOW it, the compact secondary strip, and the graph provider
+    // pill. All hidden in Claude-only mode (kept out of layout), so the panel is the
+    // literal v0.8 instrument then.
+    private let tagRowItem = NSMenuItem()
+    private let tagRowView = TagRowView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
+                                                      height: TagRowView.height))
+    private let bannerItem = NSMenuItem()
+    private let bannerView = BannerView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width, height: 40))
+    private let stripItem = NSMenuItem()
+    private let stripView = StripView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
+                                                    height: StripView.mainRowHeight + 11))
+    private let graphProviderItem = NSMenuItem()
+    private let graphProviderView = GraphProviderPillsView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
+                                                                         height: GraphProviderPillsView.height))
+    // The two-provider settings roots, kept as properties so openResolve can show/
+    // hide them from the live install stat (hidden on a clean machine; visible even
+    // under Show Codex = Off, which must stay reversible from the UI).
+    private let barShowsRootItem = NSMenuItem()
+    private let showCodexRootItem = NSMenuItem()
     private let statusLine = NSMenuItem()
     private let loginToggle = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
     private let dockToggle = NSMenuItem(title: "Show Dock Icon", action: nil, keyEquivalent: "")
@@ -87,6 +128,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let codexMinFetchGap: TimeInterval = 20
     private var codexScanHighWater = Date.distantPast
     private var lastCodexDiskTrimAt = Date()                   // launch task trims; ingest re-trims ~daily
+
+    // Codex sessions (merged into the session list in two-provider mode). Read on its
+    // OWN gate off the main actor, same detached pattern as the Claude session poll;
+    // fully isolated from the Claude fetch and the codex usage poll.
+    private let codexSessionsClient = CodexSessionsClient()
+    private var codexSessions = CodexSessionsSnapshot(rows: [], execRunsToday: 0)
+    private var isReadingCodexSessions = false
+    private var lastCodexSessionsReadAt = Date.distantPast
 
     private let barFont = NSFont.monospacedDigitSystemFont(
         ofSize: NSFont.systemFontSize, weight: .regular)
@@ -181,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startTimer()
         refreshNow()
         refreshSessions(force: true)
+        refreshCodexSessions(force: true)
     }
 
     // MARK: - Menu
@@ -190,20 +240,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false       // keep info rows full-color & readable
         menu.delegate = self
 
-        // The instrument panel: header (rings + numbers) and the
-        // model-specific weekly text rows (shown only when in use).
+        // The instrument panel. In two-provider mode a provider tag row sits ABOVE
+        // the header and an honesty banner BELOW it; both are hidden (out of layout)
+        // in Claude-only mode, so the header is rings + numbers exactly as v0.8.
+        tagRowItem.isEnabled = false
+        tagRowItem.view = tagRowView
+        tagRowItem.isHidden = true
+        menu.addItem(tagRowItem)
+
         headerItem.isEnabled = false
         headerItem.view = headerView
         menu.addItem(headerItem)
+
+        bannerItem.isEnabled = false
+        bannerItem.view = bannerView
+        bannerItem.isHidden = true
+        menu.addItem(bannerItem)
+
+        // Model-specific weekly rows (shown only when Claude is primary and in use).
         for item in [opusItem, sonnetItem] {
             item.isEnabled = false
             item.isHidden = true
             menu.addItem(item)
         }
 
-        // Graph card: range/mode pills directly above the (now interactive)
-        // graph. Both items stay enabled — a disabled item can gate event
-        // delivery to its view, and these views handle their own clicks/hover.
+        // The compact secondary strip (two-provider only). Its Lead button swaps
+        // which provider leads the instrument, in place.
+        stripItem.isEnabled = true          // the Lead button needs the click
+        stripItem.view = stripView
+        stripItem.isHidden = true
+        stripView.onLead = { [weak self] in self?.leadSwap() }
+        menu.addItem(stripItem)
+
+        // Graph card: a provider pill row (two-provider only), then range/mode pills
+        // directly above the (interactive) graph. All enabled — a disabled item can
+        // gate event delivery to its view, and these views handle their own clicks.
+        graphProviderItem.isEnabled = true
+        graphProviderItem.view = graphProviderView
+        graphProviderItem.isHidden = true
+        graphProviderView.onChange = { [weak self] p in
+            self?.graphProvider = p
+            self?.applyGraphData()
+        }
+        menu.addItem(graphProviderItem)
+
         pillsItem.isEnabled = true
         pillsItem.view = pillsView
         menu.addItem(pillsItem)
@@ -243,6 +323,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         colorRoot.submenu = buildColorMenu()
         menu.addItem(colorRoot)
 
+        // Two-provider controls (package 4b). Bar Shows and Show Codex follow the
+        // same enum-driven submenu pattern as Display Style / Color. Primary provider
+        // is chosen with the strip's Lead button rather than a menu item. Both items
+        // are hidden until openResolve confirms Codex is installed (a clean machine
+        // sees the literal v0.8 settings menu); they stay visible under Show Codex =
+        // Off so Off remains reversible from the UI.
+        barShowsRootItem.title = "Bar Shows"
+        barShowsRootItem.submenu = buildBarShowsMenu()
+        barShowsRootItem.isHidden = true
+        menu.addItem(barShowsRootItem)
+
+        showCodexRootItem.title = "Show Codex"
+        showCodexRootItem.submenu = buildShowCodexMenu()
+        showCodexRootItem.isHidden = true
+        menu.addItem(showCodexRootItem)
+
         loginToggle.action = #selector(toggleLoginItem)
         loginToggle.target = self
         menu.addItem(loginToggle)
@@ -280,7 +376,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // menu is shown, so counts, relative reset times, and the banner height are
     // fresh on every open. The async reads kicked from menuWillOpen only
     // refresh the caches for next time.
+    //
+    // menuNeedsUpdate RE-ENTERS on every menu-tracking tick (the HistoryGraphView
+    // signature comment documents this), so the per-open structural work runs at
+    // most once per tracking session: openResolve is gated by `openResolved`, which
+    // menuDidClose clears. Re-running it mid-open would reset graphProvider
+    // (stomping a mid-open graph-pill selection) and re-resize the banner/strip
+    // rows, whose heights are fixed at open (amendment 1). The content renders
+    // below stay per-tick, as today.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if !openResolved { openResolve() }
         renderMenu()            // recomputes forecast + state; includes applyGraphData()
         renderSessions()
     }
@@ -289,6 +394,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshNow()                        // freshen on open (gated by minFetchGap)
         refreshSessions()                   // re-read local sessions (gated by sessionsMinGap)
         refreshCodex()                      // freshen Codex on open (its own 20s gate)
+        refreshCodexSessions()              // re-read Codex sessions (its own 2s gate)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        // Arm the next open's structural resolution (see menuNeedsUpdate).
+        openResolved = false
+    }
+
+    /// Resolve the two-provider layout ONCE per menu open (amendment 1: NSMenu can't
+    /// restructure rows while up). This decides `twoProvider`, sets the tag / banner /
+    /// strip / graph-pill row visibility, resets the graph to the primary provider,
+    /// freezes the banner and strip HEIGHTS for this open, and resolves whether the
+    /// two-provider settings items appear. `renderMenu` then only mutates row CONTENT
+    /// (safe while open); a mid-open Lead swap changes content but the frozen heights
+    /// stand until the next open.
+    private func openResolve() {
+        openResolved = true
+        computeDerived(now: Date())
+        twoProvider = codexUISurfacesVisible()
+        graphProvider = Settings.primaryProvider
+        graphProviderView.selected = graphProvider
+
+        tagRowItem.isHidden = !twoProvider
+        bannerItem.isHidden = !twoProvider
+        stripItem.isHidden = !twoProvider
+        graphProviderItem.isHidden = !twoProvider
+
+        // The two-provider settings controls exist only when Codex is installed (a
+        // clean machine sees the literal v0.8 settings menu). Deliberately keyed on
+        // the ROOT stat, not on showCodex: under Show Codex = Off the items stay
+        // visible, otherwise Off would be a trap with no UI path back.
+        let installed = FileManager.default.fileExists(atPath: Self.codexRootPath)
+        barShowsRootItem.isHidden = !installed
+        showCodexRootItem.isHidden = !installed
+
+        guard twoProvider else { return }
+        // Freeze this open's heights from the primary banner text and the secondary
+        // strip model (its sub-banner, when present, drives the strip height).
+        let primaryMsg = (Settings.primaryProvider == .claude ? claudeDerived?.msg : codexDerived?.msg) ?? ""
+        resize(bannerView, height: BannerView.height(for: primaryMsg, viewWidth: PanelStyle.width))
+        resize(stripView, height: StripView.height(for: secondaryStripModel(), viewWidth: PanelStyle.width))
+    }
+
+    private func resize(_ view: NSView, height: CGFloat) {
+        view.frame = NSRect(x: 0, y: 0, width: PanelStyle.width, height: ceil(height))
+    }
+
+    /// Whether the Codex UI surfaces are shown. `Show Codex` resolves the intent
+    /// (auto/on/off), but a provider with no install (`.notInstalled`) has nothing
+    /// meaningful to render, so it stays hidden even under `on` (amendment: production
+    /// renders nothing for an absent provider). Auto's install gate is a LIVE stat of
+    /// `~/.codex`, not the (poll-cached) usage status alone: a root deleted mid-run
+    /// hides the surfaces immediately. Accepted residual in the other direction: a
+    /// root APPEARING mid-run still becomes visible only once the next codex poll
+    /// (20 s gate / 5 min timer / menu open) flips the status off `.notInstalled`,
+    /// matching the packages' poll-driven design.
+    private func codexUISurfacesVisible() -> Bool {
+        let status = codexUsage?.status ?? .notInstalled
+        guard status != .notInstalled else { return false }
+        let rootExists = FileManager.default.fileExists(atPath: Self.codexRootPath)
+        return ProviderState.codexVisible(Settings.showCodex, codexRootExists: rootExists)
     }
 
     // MARK: - Fetching
@@ -299,13 +465,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.refreshNow()
                 self?.refreshSessions()
                 self?.refreshCodex()
+                self?.refreshCodexSessions()
             }
         }
         t.tolerance = 15                    // let the OS coalesce wakeups
         timer = t
     }
 
-    @objc private func systemDidWake() { refreshNow(); refreshSessions(); refreshCodex() }
+    @objc private func systemDidWake() {
+        refreshNow(); refreshSessions(); refreshCodex(); refreshCodexSessions()
+    }
 
     // Timer / wake / menu-open: respect the gates (gap + 429 cooldown).
     @objc private func refreshNow() { performFetch(force: false) }
@@ -376,13 +545,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Re-read the Codex interactive sessions off the main actor (read-only file I/O),
+    // then merge into the session list on the main actor. Same detached pattern and
+    // gate as refreshSessions; fully isolated from every Claude gate.
+    private func refreshCodexSessions(force: Bool = false) {
+        guard !isReadingCodexSessions else { return }
+        let now = Date()
+        if !force, now < lastCodexSessionsReadAt.addingTimeInterval(sessionsMinGap) { return }
+        isReadingCodexSessions = true
+        lastCodexSessionsReadAt = now
+        let client = codexSessionsClient
+        Task.detached(priority: .utility) {
+            let snap = client.fetch()
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.codexSessions = snap
+                self.isReadingCodexSessions = false
+                self.renderSessions()
+            }
+        }
+    }
+
     // Poll Codex on its OWN gate, fully isolated from the Claude fetch. Cheap
     // read-only file I/O off the main actor (like refreshSessions), hopping to the
-    // main actor only to store the snapshot and record history. Package 2 renders
-    // nothing: the results are stored and the history recorded for later packages.
-    // The collect cutoff is max(scanHighWater, lastStored): the high-water keeps us
-    // from re-reading events the decimator already dropped, while the last stored
-    // sample bounds a fresh launch before any high-water has been observed.
+    // main actor only to store the snapshot, record history, and re-render. It never
+    // reads or writes any Claude gate. The collect cutoff is max(scanHighWater,
+    // lastStored): the high-water keeps us from re-reading events the decimator
+    // already dropped, while the last stored sample bounds a fresh launch before any
+    // high-water has been observed.
     private func refreshCodex(force: Bool = false) {
         guard !isFetchingCodex else { return }
         let now = Date()
@@ -399,15 +589,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 defer { self.isFetchingCodex = false }
                 self.codexUsage = result
                 self.ingestCodexEvents(events)
+                // A fresh Codex reading can flip two-provider visibility or the pip
+                // severity; refresh the bar (always safe) and the panel content (safe
+                // while open: row STRUCTURE was resolved at open, this only mutates
+                // content). Rows are added/removed only on the next open.
+                self.renderMenu()
+                self.renderBar()
             }
         }
     }
 
     // MARK: - Rendering
 
+    /// The bar resolves Codex visibility on EVERY render (it is not a menu, so the
+    /// "restructure only at open" rule does not apply): a hidden/absent Codex keeps
+    /// the literal v0.8 bar; a present one respects `Bar Shows` and draws the corner
+    /// pip. `codexUISurfacesVisible()` reads the freshest usage status, so the bar
+    /// tracks Codex even while the menu is closed.
     private func renderBar() {
         guard let button = statusItem.button else { return }
+        if codexUISurfacesVisible() {
+            renderBarTwoProvider(button)
+        } else {
+            renderBarClaudeOnly(button)
+        }
+    }
 
+    /// The unchanged v0.8 bar: the Claude glyph, with the rejected-token "⚠" takeover.
+    private func renderBarClaudeOnly(_ button: NSStatusBarButton) {
         // A rejected token wins over everything: surface the loud "⚠" even when we
         // still hold a stale snapshot from before the token went bad — otherwise the
         // bar would keep showing old numbers as if all were well.
@@ -445,6 +654,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         button.toolTip = Self.tooltipText(snap, lastError: lastError)
     }
 
+    /// The two-provider bar. `Bar Shows` selects Primary (+ the other provider's pip),
+    /// Both (side-by-side glyphs), or a single provider. Provider isolation
+    /// (amendment 13): the "⚠" auth takeover fires ONLY when the bar shows Claude
+    /// alone (Bar Shows = Claude); otherwise a signed-out Claude is carried by an
+    /// amber pip plus the panel copy, and the bar keeps drawing glyphs.
+    private func renderBarTwoProvider(_ button: NSStatusBarButton) {
+        computeDerived(now: Date())
+        let style = Settings.style
+        let mode = Settings.colorMode
+        let bar = Settings.barShows
+        let primary = Settings.primaryProvider
+
+        if bar == .claude && needsAuth {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.attributedTitle = NSAttributedString(string: "⚠", attributes: [
+                .font: barFont, .foregroundColor: NSColor.systemRed])
+            button.toolTip = lastError ?? "Not authorized."
+            return
+        }
+
+        let cFive = snapshot?.primary?.utilization
+        let cWeek = snapshot?.secondary?.utilization
+        let xFive = codexDerived?.five
+        let xWeek = codexDerived?.week
+        let xInfF = codexDerived?.inferredFive ?? false
+        let xInfW = codexDerived?.inferredWeek ?? false
+        let xProj = (codexDerived?.forecastActive ?? false) ? codexDerived?.projFive : nil
+        // The pip carries the OTHER provider (relative to the primary glyph).
+        let otherPip = primary == .claude ? (codexDerived?.pip ?? .hidden)
+                                          : (claudeDerived?.pip ?? .hidden)
+
+        if style == .percentages {
+            let attr: NSAttributedString
+            switch bar {
+            case .primary, .both:
+                // Text can't stack two providers cleanly, so the primary's numbers
+                // carry the other provider as the trailing pip bullet (amendment 6).
+                let (f, w) = primary == .claude ? (cFive, cWeek) : (xFive, xWeek)
+                attr = StatusRenderer.percentText(f, w, mode, barFont, pip: otherPip)
+            case .claude:
+                attr = StatusRenderer.percentText(cFive, cWeek, mode, barFont)
+            case .codex:
+                attr = StatusRenderer.percentText(xFive, xWeek, mode, barFont)
+            }
+            button.image = nil
+            button.imagePosition = .noImage
+            button.attributedTitle = attr
+        } else {
+            func claudeGlyph(pip: PipSeverity?) -> NSImage {
+                StatusRenderer.image(five: cFive, week: cWeek, style: style, mode: mode,
+                                     projected: forecast?.projected, provider: .claude, pip: pip)
+            }
+            func codexGlyph(pip: PipSeverity?) -> NSImage {
+                StatusRenderer.image(five: xFive, week: xWeek, style: style, mode: mode,
+                                     projected: xProj, provider: .codex, pip: pip,
+                                     inferredFive: xInfF, inferredWeek: xInfW)
+            }
+            let img: NSImage
+            switch bar {
+            case .primary:
+                img = primary == .claude ? claudeGlyph(pip: otherPip) : codexGlyph(pip: otherPip)
+            case .both:
+                img = StatusRenderer.sideBySide(claudeGlyph(pip: nil), codexGlyph(pip: nil))
+            case .claude:
+                img = claudeGlyph(pip: nil)
+            case .codex:
+                img = codexGlyph(pip: nil)
+            }
+            button.attributedTitle = NSAttributedString(string: "")
+            button.image = img
+            button.imagePosition = .imageOnly
+        }
+        button.toolTip = twoProviderTooltip()
+    }
+
+    private func twoProviderTooltip() -> String {
+        var tip = snapshot.map { Self.tooltipText($0, lastError: lastError) } ?? (lastError ?? "Loading…")
+        if let cd = codexDerived, cd.hasData {
+            tip += "\nCodex 5-hour: \(Self.percent(cd.five))"
+            if cd.week != nil { tip += "\nCodex Weekly: \(Self.percent(cd.week))" }
+        }
+        return tip
+    }
+
     /// Re-render only when the menu bar actually crosses the light/dark boundary,
     /// so vibrancy / contrast sub-changes don't trigger needless redraws.
     private func appearanceDidChange() {
@@ -457,10 +751,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func renderMenu() {
         let now = Date()
+        computeDerived(now: now)
+        if twoProvider {
+            renderTwoProviderInstrument(now: now)
+        } else {
+            renderClaudeOnlyHeader(now: now)   // the literal v0.8 header
+        }
+        configureExtrasRows()                  // Opus/Sonnet only when Claude is primary
+        renderStatusLine(now: now)
+        applyGraphData()                       // refresh the graph row when a fetch lands
+    }
+
+    /// Recompute the two providers' forecasts and derived UI states. `forecast`
+    /// (Claude's, also feeding the header ghost arc) is computed exactly as before;
+    /// `codexForecast` runs the same math over the Codex history and is gated inside
+    /// `deriveCodex`. Pure derivation lives in ProviderState; this only gathers the
+    /// live inputs off `self`.
+    private func computeDerived(now: Date) {
+        let five = snapshot?.primary?.utilization
+        let fiveReset = snapshot?.primary?.resetsAt
+        forecast = Forecast.compute(samples: history, now: now, current: five, resetsAt: fiveReset)
+
+        let cx = codexUsage?.snapshot
+        codexForecast = Forecast.compute(samples: codexHistory, now: now,
+                                         current: cx?.primary?.utilization,
+                                         resetsAt: cx?.primary?.resetsAt)
+
+        let hm = Self.updatedFormatter
+        // "Stale" is the app's existing condition: a later poll failed but the prior
+        // snapshot still stands. Signed-out is the rejected-token state.
+        let staleError = lastError != nil && snapshot != nil
+        claudeDerived = ProviderState.deriveClaude(
+            five: five, week: snapshot?.secondary?.utilization,
+            fiveResetsAt: fiveReset, weekResetsAt: snapshot?.secondary?.resetsAt,
+            signedOut: needsAuth, staleError: staleError,
+            observedAt: snapshot?.fetchedAt, forecast: forecast, now: now, hm: hm)
+        codexDerived = ProviderState.deriveCodex(
+            result: codexUsage ?? CodexUsageResult(status: .notInstalled, snapshot: nil),
+            forecast: codexForecast, now: now, hm: hm)
+    }
+
+    /// The unchanged v0.8 instrument header (Claude, no tag row, no banner). Byte-for-
+    /// byte the pre-4b construction: the model's `provider`/`inferred*` defaults leave
+    /// the rings coral and solid.
+    private func renderClaudeOnlyHeader(now: Date) {
         let five = snapshot?.primary?.utilization
         let resetsAt = snapshot?.primary?.resetsAt
-        forecast = Forecast.compute(samples: history, now: now, current: five, resetsAt: resetsAt)
-
         headerView.configure(PanelHeaderModel(
             five: five,
             week: snapshot?.secondary?.utilization,
@@ -471,14 +807,185 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             weekResetAbs: snapshot?.secondary?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
             weekResetRel: snapshot?.secondary?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
             signedOut: needsAuth))
+    }
 
-        if let snap = snapshot {
+    /// Configure the two-provider instrument: the primary provider's tag row, rings +
+    /// numbers (in the shared header view), and honesty banner, plus the secondary
+    /// provider's compact strip.
+    private func renderTwoProviderInstrument(now: Date) {
+        let primary = Settings.primaryProvider
+        if primary == .claude {
+            configureClaudePrimary(now: now)
+        } else {
+            configureCodexPrimary(now: now)
+        }
+        stripView.configure(secondaryStripModel())
+    }
+
+    private func configureClaudePrimary(now: Date) {
+        let cd = claudeDerived
+        tagRowView.configure(TagRowModel(
+            provider: .claude, label: "Claude", planType: nil, showLocalChip: false,
+            ageLine: cd?.ageLine ?? "", ageWarn: cd?.ageWarn ?? false))
+        let five = snapshot?.primary?.utilization
+        let resetsAt = snapshot?.primary?.resetsAt
+        headerView.configure(PanelHeaderModel(
+            five: five, week: snapshot?.secondary?.utilization,
+            projected: forecast?.projected, fiveIsRed: cd?.isRed ?? false,
+            fiveResetAbs: resetsAt.map { "resets \(Self.dailyResetFormatter.string(from: $0))" },
+            fiveResetRel: resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
+            weekResetAbs: snapshot?.secondary?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
+            weekResetRel: snapshot?.secondary?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
+            signedOut: needsAuth, provider: .claude))
+        bannerView.configure(BannerModel(dotColor: bannerDot(cd?.pip, .claude), text: cd?.msg ?? ""))
+    }
+
+    private func configureCodexPrimary(now: Date) {
+        let cd = codexDerived
+        tagRowView.configure(TagRowModel(
+            provider: .codex, label: "Codex", planType: cd?.planType, showLocalChip: cd?.hasData ?? false,
+            ageLine: cd?.ageLine ?? "", ageWarn: cd?.ageWarn ?? false))
+        let five = cd?.five
+        let fr = cd?.fiveResetsAt
+        let wr = cd?.weekResetsAt
+        headerView.configure(PanelHeaderModel(
+            five: five, week: cd?.week,
+            projected: (cd?.forecastActive ?? false) ? cd?.projFive : nil,
+            fiveIsRed: cd?.isRed ?? false,
+            fiveResetAbs: fr.map { "resets \(Self.dailyResetFormatter.string(from: $0))" },
+            fiveResetRel: fr.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
+            weekResetAbs: wr.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
+            weekResetRel: wr.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
+            signedOut: !(cd?.hasData ?? false),
+            provider: .codex,
+            inferredFive: cd?.inferredFive ?? false,
+            inferredWeek: cd?.inferredWeek ?? false))
+        bannerView.configure(BannerModel(dotColor: bannerDot(cd?.pip, .codex), text: cd?.msg ?? ""))
+    }
+
+    /// The banner/sub-banner bullet color: the pip severity's color, falling back to
+    /// the provider accent for a calm state (pipColor returns the accent there) and to
+    /// a neutral gray if the severity is hidden.
+    private func bannerDot(_ pip: PipSeverity?, _ provider: UsageProviderKind) -> NSColor {
+        guard let pip else { return StatusRenderer.providerAccent(provider) }
+        return StatusRenderer.pipColor(pip) ?? .tertiaryLabelColor
+    }
+
+    /// Build the compact strip model for the SECONDARY provider (the one not leading
+    /// the instrument). Codex secondary carries its own honesty sub-banner; Claude
+    /// secondary appends compact in-use Opus/Sonnet extras to the reset line
+    /// (amendment 8) since its dedicated extras rows are hidden.
+    private func secondaryStripModel() -> StripModel {
+        let secondary: UsageProviderKind = Settings.primaryProvider == .claude ? .codex : .claude
+        let now = Date()
+        return secondary == .codex ? codexStripModel(now: now) : claudeStripModel(now: now)
+    }
+
+    private func codexStripModel(now: Date) -> StripModel {
+        let cd = codexDerived
+        let hasData = cd?.hasData ?? false
+        let resetLine: String? = {
+            guard hasData, let fr = cd?.fiveResetsAt else { return nil }
+            return "resets \(Self.dailyResetFormatter.string(from: fr)) \u{00B7} \(Self.rel(fr.timeIntervalSince(now)))"
+        }()
+        // The honesty sub-banner shows for any inferred window (amendment 9 treats
+        // the weekly roll first-class; its appended msg sentence must be visible) as
+        // well as for an aged reading.
+        let inferredAny = (cd?.inferredFive ?? false) || (cd?.inferredWeek ?? false)
+        let sub: BannerModel? = (hasData && (inferredAny || (cd?.aged ?? false)))
+            ? BannerModel(dotColor: bannerDot(cd?.pip, .codex), text: cd?.msg ?? "") : nil
+        return StripModel(
+            provider: .codex, label: "Codex", planType: cd?.planType,
+            showLocalChip: hasData, hasData: hasData,
+            noDataMessage: hasData ? nil : cd?.msg,
+            ageLine: cd?.ageLine ?? "", ageWarn: cd?.ageWarn ?? false,
+            five: cd?.five, week: cd?.week, mode: Settings.colorMode,
+            fiveIsRed: cd?.isRed ?? false,
+            inferredFive: cd?.inferredFive ?? false, inferredWeek: cd?.inferredWeek ?? false,
+            rawFivePct: (cd?.inferredFive ?? false) ? cd?.rawFive.map { Int($0.rounded()) } : nil,
+            rawWeekPct: (cd?.inferredWeek ?? false) ? cd?.rawWeek.map { Int($0.rounded()) } : nil,
+            resetLine: resetLine, subBanner: sub, otherLabel: "Claude")
+    }
+
+    private func claudeStripModel(now: Date) -> StripModel {
+        let cd = claudeDerived
+        let hasData = snapshot != nil && !needsAuth
+        var resetLine: String? = nil
+        if hasData, let fr = snapshot?.primary?.resetsAt {
+            var s = "resets \(Self.dailyResetFormatter.string(from: fr)) \u{00B7} \(Self.rel(fr.timeIntervalSince(now)))"
+            // Amendment 8: warning-relevant model caps ride along on the reset line
+            // when Claude is secondary (its dedicated extras rows are hidden).
+            if let opus = snapshot?.extra("opus"), opus.utilization > 0 {
+                s += " \u{00B7} Opus \(Int(opus.utilization.rounded()))%"
+            }
+            if let sonnet = snapshot?.extra("sonnet"), sonnet.utilization > 0 {
+                s += " \u{00B7} Sonnet \(Int(sonnet.utilization.rounded()))%"
+            }
+            resetLine = s
+        }
+        return StripModel(
+            provider: .claude, label: "Claude", planType: nil,
+            showLocalChip: false, hasData: hasData,
+            noDataMessage: hasData ? nil : (cd?.msg ?? "Signed out."),
+            ageLine: cd?.ageLine ?? "", ageWarn: cd?.ageWarn ?? false,
+            five: snapshot?.primary?.utilization, week: snapshot?.secondary?.utilization,
+            mode: Settings.colorMode, fiveIsRed: cd?.isRed ?? false,
+            inferredFive: false, inferredWeek: false, rawFivePct: nil, rawWeekPct: nil,
+            resetLine: resetLine, subBanner: nil, otherLabel: "Codex")
+    }
+
+    /// The Opus/Sonnet weekly rows appear only when Claude is the primary instrument
+    /// (amendment 8): today's behavior in Claude-only mode, and unchanged when Claude
+    /// leads in two-provider mode. When Codex leads they hide (the strip carries the
+    /// compact extras instead).
+    private func configureExtrasRows() {
+        let claudePrimary = !twoProvider || Settings.primaryProvider == .claude
+        if claudePrimary, let snap = snapshot {
             configureModelRow(opusItem, label: "Weekly · Opus", snap.extra("opus"))
             configureModelRow(sonnetItem, label: "Weekly · Sonnet", snap.extra("sonnet"))
+        } else {
+            opusItem.isHidden = true
+            sonnetItem.isHidden = true
         }
-        statusLine.title = Self.statusLineText(fetchedAt: snapshot?.fetchedAt,
-                                               lastError: lastError, formatter: Self.updatedFormatter)
-        applyGraphData()        // refresh the graph row when a fetch lands
+    }
+
+    /// The status line. Claude-only keeps today's plain string (amendment 12); two-
+    /// provider becomes an attributed title "Updated HH:MM · Codex as of HH:MM · Nh
+    /// ago" with the Codex age segment amber when aged.
+    private func renderStatusLine(now: Date) {
+        let claudeText = Self.statusLineText(fetchedAt: snapshot?.fetchedAt,
+                                             lastError: lastError, formatter: Self.updatedFormatter)
+        guard twoProvider, let cd = codexDerived, cd.hasData else {
+            statusLine.attributedTitle = nil        // revert to the plain title path
+            statusLine.title = claudeText
+            return
+        }
+        let seg = ProviderState.codexStatusSegment(observedAt: cd.observedAt, aged: cd.aged,
+                                                   hm: Self.updatedFormatter, now: now)
+        let full = ProviderState.twoProviderStatusLine(claudeText: claudeText, codexSegment: seg)
+        let attr = NSMutableAttributedString(string: full, attributes: [
+            .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor])
+        // Color just the trailing age ("Nh ago") amber when the reading is aged.
+        if cd.aged, let obs = cd.observedAt {
+            let ageStr = ProviderState.relAge(now.timeIntervalSince(obs))
+            if let r = full.range(of: ageStr, options: .backwards) {
+                attr.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: NSRange(r, in: full))
+            }
+        }
+        statusLine.attributedTitle = attr
+    }
+
+    /// The strip's Lead button: promote the secondary provider to primary, in place.
+    /// Content swaps immediately (rings, numbers, banner, strip, graph, bar); the row
+    /// HEIGHTS stay frozen at this open's values (amendment 1) because only
+    /// `openResolve` resizes them, and it runs on the next open.
+    private func leadSwap() {
+        Settings.primaryProvider = Settings.primaryProvider == .claude ? .codex : .claude
+        graphProvider = Settings.primaryProvider
+        graphProviderView.selected = graphProvider
+        renderMenu()
+        renderSessions()
+        renderBar()
     }
 
     /// Compact relative time: "2h 07m", "38m", "6 days".
@@ -499,34 +1006,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Fill the pre-allocated session rows in place (view content / isHidden
-    /// only — safe while the menu is open). The header carries the true count
-    /// even when more sessions exist than visible slots; the last slot then
-    /// absorbs the overflow.
+    /// One filled session row: a Claude session, a Codex session, the overflow tail,
+    /// or the muted Codex-exec summary.
+    private enum SessionRow {
+        case claude(SessionInfo)
+        case codex(ProviderSessionInfo)
+        case overflow(Int)
+        case exec(Int)
+    }
+
+    /// Fill the pre-allocated session rows in place (view content / isHidden only —
+    /// safe while the menu is open). In two-provider mode the list merges Claude and
+    /// Codex sessions under a split header (amendment 11) with a trailing exec-summary
+    /// row; Claude-only keeps today's exact wording and layout.
     private func renderSessions() {
-        let list = sessions
-        if list.isEmpty {
-            sessionsHeader.attributedTitle = Self.sessionsHeaderTitle("No active Claude sessions")
+        let claude = sessions
+        let codexRows = twoProvider ? codexSessions.rows : []
+        let execCount = twoProvider ? codexSessions.execRunsToday : 0
+
+        if claude.isEmpty && codexRows.isEmpty && execCount == 0 {
+            let title = twoProvider
+                ? ProviderState.sessionsHeader(claudeCount: 0, codexCount: 0, twoProvider: true)
+                : "No active Claude sessions"
+            sessionsHeader.attributedTitle = Self.sessionsHeaderTitle(title)
             for it in sessionRowItems { it.isHidden = true }
             return
         }
         sessionsHeader.attributedTitle = Self.sessionsHeaderTitle(
-            list.count == 1 ? "1 active session" : "\(list.count) active sessions")
+            ProviderState.sessionsHeader(claudeCount: claude.count, codexCount: codexRows.count,
+                                         twoProvider: twoProvider))
 
+        // Sessions first (Claude then Codex), the exec summary last. The exec row
+        // reserves one slot and is never counted in the overflow "+ N more".
         let cap = Self.maxSessionRows
-        let overflow = list.count > cap
-        let realRows = overflow ? cap - 1 : list.count
+        let hasExec = execCount > 0
+        let sessionBudget = hasExec ? cap - 1 : cap
+        var descriptors: [SessionRow] = claude.map { .claude($0) } + codexRows.map { .codex($0) }
+        var rows: [SessionRow] = []
+        if descriptors.count > sessionBudget {
+            let shown = max(0, sessionBudget - 1)
+            rows = Array(descriptors.prefix(shown))
+            rows.append(.overflow(descriptors.count - shown))
+        } else {
+            rows = descriptors
+        }
+        if hasExec { rows.append(.exec(execCount)) }
+        descriptors = rows
+
         for (i, it) in sessionRowItems.enumerated() {
             guard let view = it.view as? SessionRowView else { continue }
-            if i < realRows {
-                view.configure(list[i])
-                it.isHidden = false
-            } else if overflow, i == realRows {
-                view.configureOverflow(list.count - realRows)
-                it.isHidden = false
-            } else {
-                it.isHidden = true
+            guard i < descriptors.count else { it.isHidden = true; continue }
+            switch descriptors[i] {
+            case .claude(let s):   view.configure(s)
+            case .codex(let s):    view.configure(codex: s)
+            case .overflow(let n): view.configureOverflow(n)
+            case .exec(let n):     view.configureExec(n)
             }
+            it.isHidden = false
         }
     }
 
@@ -597,7 +1133,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // them dirty so the next menu open repaints in the new mode.
         renderMenu()
         pillsView.needsDisplay = true
+        for v in [tagRowView, bannerView, stripView, graphProviderView] as [NSView] { v.needsDisplay = true }
         for it in sessionRowItems { it.view?.needsDisplay = true }
+    }
+
+    private func buildBarShowsMenu() -> NSMenu {
+        let m = NSMenu()
+        for b in BarShows.allCases {
+            let it = NSMenuItem(title: b.title, action: #selector(selectBarShows(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = b.rawValue
+            it.state = (b == Settings.barShows) ? .on : .off
+            m.addItem(it)
+        }
+        return m
+    }
+
+    private func buildShowCodexMenu() -> NSMenu {
+        let m = NSMenu()
+        for s in ShowCodex.allCases {
+            let it = NSMenuItem(title: s.title, action: #selector(selectShowCodex(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = s.rawValue
+            it.state = (s == Settings.showCodex) ? .on : .off
+            m.addItem(it)
+        }
+        return m
+    }
+
+    @objc private func selectBarShows(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let b = BarShows(rawValue: raw) else { return }
+        Settings.barShows = b
+        sender.menu?.items.forEach { $0.state = (($0.representedObject as? String) == raw) ? .on : .off }
+        renderBar()
+    }
+
+    @objc private func selectShowCodex(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let s = ShowCodex(rawValue: raw) else { return }
+        Settings.showCodex = s
+        sender.menu?.items.forEach { $0.state = (($0.representedObject as? String) == raw) ? .on : .off }
+        // The bar can update immediately; the panel's row structure is resolved on the
+        // next open (NSMenu can't restructure rows while up).
+        renderBar()
     }
 
     // MARK: - Usage history
@@ -622,14 +1199,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Build the windowed GraphData from the in-memory buffer and hand it to the view. Cheap
-    /// (a slice); the view skips the redraw when nothing meaningful changed.
+    /// Build the windowed GraphData from the selected provider's buffer and hand it to
+    /// the view. In two-provider mode the provider pill picks Claude or Codex history;
+    /// Claude-only always graphs Claude, byte-for-byte as v0.8 (the Codex branch is
+    /// unreachable and every added field takes its default). Cheap (a slice); the view
+    /// skips the redraw when nothing meaningful changed.
     private func applyGraphData() {
         let now = Date()
         let cutoff = now.addingTimeInterval(-Settings.historyRange.duration)
-        let sliced = history.filter { $0.t >= cutoff }
+        if twoProvider && graphProvider == .codex {
+            let cd = codexDerived
+            let active = cd?.forecastActive ?? false
+            graphView.update(GraphData(
+                samples: codexHistory.filter { $0.t >= cutoff },
+                mode: Settings.graphMode, range: Settings.historyRange,
+                colorMode: Settings.colorMode, now: now,
+                fiveNow: cd?.five, weekNow: cd?.week,
+                fiveResetsAt: cd?.fiveResetsAt,
+                projected: active ? cd?.projFive : nil,
+                crosses: active && (codexForecast?.crosses ?? false),
+                crossTime: active ? cd?.crossTime : nil,
+                provider: .codex, forecastIdle: !active))
+            return
+        }
         graphView.update(GraphData(
-            samples: sliced,
+            samples: history.filter { $0.t >= cutoff },
             mode: Settings.graphMode,
             range: Settings.historyRange,
             colorMode: Settings.colorMode,

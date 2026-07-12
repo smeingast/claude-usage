@@ -69,6 +69,13 @@ struct PanelHeaderModel {
     var weekResetAbs: String?       // "resets Sun 03:00"
     var weekResetRel: String?       // "in 7 days"
     var signedOut: Bool             // empty rings + em-dash values
+    // Two-provider additions (package 4b). Defaults reproduce the v0.8 Claude header
+    // byte-for-byte: `provider == .claude` keeps coral, `inferred*` false keeps solid
+    // rings. Only the two-provider instrument sets these to render Codex / a rolled
+    // window; the Claude-only path never touches them.
+    var provider: UsageProviderKind = .claude
+    var inferredFive: Bool = false
+    var inferredWeek: Bool = false
 }
 
 /// The instrument: concentric rings (outer = 5-hour, inner = weekly, same
@@ -148,53 +155,17 @@ final class PanelHeaderView: NSView {
         }
     }
 
-    /// Ring geometry from the design handoff: lw = size·0.092, arc from 12
-    /// o'clock, clockwise, round caps; ghost arc UNDER the value arc so only
-    /// the current→projected span shows.
+    /// Ring geometry now lives in the shared `PanelRings.draw` so the two-provider
+    /// instrument and the compact strip match this header exactly. With the model's
+    /// defaults (`provider == .claude`, no inferred windows) the output is
+    /// byte-identical to the v0.8 header: `StatusRenderer.color` with the default
+    /// provider is the same call this used to make, and the rO/rI rings never overlap
+    /// so the reordered draw sequence paints the same pixels.
     private func drawRings(in rect: NSRect, _ m: PanelHeaderModel) {
-        let size = rect.width
-        let lw = size * 0.092
-        let c = NSPoint(x: rect.midX, y: rect.midY)
-        let rO = size / 2 - lw / 2 - 1.2
-        let rI = rO - lw - 2.8
-
-        func arc(radius: CGFloat, frac: Double, color: NSColor) {
-            guard frac > 0 else { return }
-            let path = NSBezierPath()
-            // Flipped coordinates: clockwise on screen is counterclockwise in
-            // path space; start at 12 o'clock (angle -90 in flipped space).
-            path.appendArc(withCenter: c, radius: radius, startAngle: -90,
-                           endAngle: -90 + 360 * min(1, frac), clockwise: false)
-            path.lineWidth = lw
-            path.lineCapStyle = .round
-            color.setStroke()
-            path.stroke()
-        }
-        func trackRing(_ radius: CGFloat) {
-            let p = NSBezierPath(ovalIn: NSRect(x: c.x - radius, y: c.y - radius,
-                                                width: radius * 2, height: radius * 2))
-            p.lineWidth = lw
-            PanelStyle.track.setStroke()
-            p.stroke()
-        }
-        trackRing(rO)
-        trackRing(rI)
-        guard !m.signedOut else { return }
-        // Value arcs take the glyph's exact color function, so the rings track
-        // the Color mode: coral (red ≥90) for Claude, orange/red warnings for
-        // thresholds, the heat hue, the system accent, or plain ink.
-        let mode = Settings.colorMode
-        if let projected = m.projected, let five = m.five, projected > five + 0.5 {
-            // At-cap amber matches the glyph's ghost: translucent, so it stays
-            // separable from an orange heatmap/thresholds value arc.
-            arc(radius: rO, frac: projected / 100,
-                color: projected >= 100 ? NSColor.systemOrange.withAlphaComponent(0.45)
-                                        : StatusRenderer.color(five, mode).withAlphaComponent(0.30))
-        }
-        arc(radius: rO, frac: (m.five ?? 0) / 100,
-            color: StatusRenderer.color(m.five ?? 0, mode))
-        arc(radius: rI, frac: (m.week ?? 0) / 100,
-            color: StatusRenderer.color(m.week ?? 0, mode).withAlphaComponent(0.5))
+        PanelRings.draw(in: rect, five: m.five, week: m.week, projected: m.projected,
+                        mode: Settings.colorMode, provider: m.provider,
+                        inferredFive: m.inferredFive, inferredWeek: m.inferredWeek,
+                        signedOut: m.signedOut)
     }
 }
 
@@ -210,6 +181,12 @@ final class SessionRowView: NSView {
     static let height: CGFloat = 30
     private var info: SessionInfo?
     private var overflowCount = 0
+    // Two-provider additions (package 4b). A row renders one of: a Claude session
+    // (`info`), a Codex session (`codexInfo`), the overflow tail (`overflowCount`),
+    // or the muted Codex-exec summary (`execCount`). Every configure resets the
+    // others so a reused row never mixes states.
+    private var codexInfo: ProviderSessionInfo?
+    private var execCount = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -221,7 +198,7 @@ final class SessionRowView: NSView {
     override var isFlipped: Bool { true }
 
     func configure(_ s: SessionInfo) {
-        info = s; overflowCount = 0
+        info = s; overflowCount = 0; codexInfo = nil; execCount = 0
         var label = "\(s.projectName), \(s.status)"
         if let m = s.shortModel { label += ", \(m)" }
         setAccessibilityLabel(label)
@@ -230,8 +207,28 @@ final class SessionRowView: NSView {
     }
 
     func configureOverflow(_ count: Int) {
-        info = nil; overflowCount = count
+        info = nil; overflowCount = count; codexInfo = nil; execCount = 0
         setAccessibilityLabel("and \(count) more sessions")
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    /// A Codex interactive ("cli") session row: teal (active) / gray (recent) dot,
+    /// project, model chip, a context bar against the true per-turn window, and the
+    /// active/recent tag (words that describe the log, never a live process).
+    func configure(codex s: ProviderSessionInfo) {
+        codexInfo = s; info = nil; overflowCount = 0; execCount = 0
+        let project = (s.cwd as NSString).lastPathComponent
+        setAccessibilityLabel("\(project.isEmpty ? s.cwd : project), \(s.status), Codex")
+        needsDisplay = true
+        displayIfNeeded()
+    }
+
+    /// The single muted summary row for today's `codex exec` automation runs; the
+    /// individual runs are never listed.
+    func configureExec(_ count: Int) {
+        execCount = count; info = nil; codexInfo = nil; overflowCount = 0
+        setAccessibilityLabel("plus \(count) Codex exec runs today")
         needsDisplay = true
         displayIfNeeded()
     }
@@ -243,6 +240,8 @@ final class SessionRowView: NSView {
 
     private func render() {
         let nameFont = NSFont.systemFont(ofSize: 12.5, weight: .semibold)
+        if execCount > 0 { renderExec(); return }
+        if let c = codexInfo { renderCodex(c, nameFont: nameFont); return }
         if overflowCount > 0 {
             PanelStyle.draw("+ \(overflowCount) more",
                             at: NSPoint(x: PanelStyle.margin + 15, y: 7),
@@ -300,6 +299,89 @@ final class SessionRowView: NSView {
         name.draw(with: nameRect, options: [.usesLineFragmentOrigin],
                   attributes: [.font: nameFont, .foregroundColor: NSColor.labelColor,
                                .paragraphStyle: para])
+    }
+
+    /// A Codex "cli" session row. Same right-to-left layout as the Claude row
+    /// (count, bar, chip, name), but with the teal/gray liveness dot, the true
+    /// per-turn context window ("103K/353K"), and the active/recent tag. The tag and
+    /// chip both use the Codex teal so the row reads as Codex at a glance.
+    private func renderCodex(_ s: ProviderSessionInfo, nameFont: NSFont) {
+        let card = NSRect(x: PanelStyle.margin, y: 0,
+                          width: bounds.width - 2 * PanelStyle.margin, height: Self.height - 6)
+        let active = s.status == "active"
+        let dot = NSRect(x: card.minX + 9, y: card.midY - 4, width: 8, height: 8)
+        (active ? StatusRenderer.codexTeal : NSColor.tertiaryLabelColor).setFill()
+        NSBezierPath(ovalIn: dot).fill()
+
+        // Context "tokens/window" on the right (window is the real per-turn window).
+        let countFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        var rightEdge = card.maxX - 9
+        let count = s.contextWindow != nil
+            ? "\(contextLabel(s.contextTokens))/\(contextLabel(s.contextWindow))"
+            : contextLabel(s.contextTokens)
+        let countW = PanelStyle.size(count, font: countFont).width
+        PanelStyle.draw(count, at: NSPoint(x: rightEdge - countW, y: card.midY - 6),
+                        font: countFont, color: .secondaryLabelColor)
+        rightEdge -= countW + 8
+
+        if let tokens = s.contextTokens, let window = s.contextWindow, window > 0 {
+            let barW: CGFloat = 56
+            let bar = NSRect(x: rightEdge - barW, y: card.midY - 2, width: barW, height: 4)
+            PanelStyle.track.setFill()
+            NSBezierPath(roundedRect: bar, xRadius: 2, yRadius: 2).fill()
+            let frac = min(1, Double(tokens) / Double(window))
+            if frac > 0.01 {
+                let fill = NSRect(x: bar.minX, y: bar.minY, width: bar.width * frac, height: bar.height)
+                (frac > 0.75 ? NSColor.systemOrange : StatusRenderer.codexTeal.withAlphaComponent(0.5)).setFill()
+                NSBezierPath(roundedRect: fill, xRadius: 2, yRadius: 2).fill()
+            }
+            rightEdge -= barW + 10
+        }
+
+        var chipEdge = rightEdge
+        if let model = s.model, !model.isEmpty {
+            let chipFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+            let tw = PanelStyle.size(model, font: chipFont).width
+            let chip = NSRect(x: chipEdge - tw - 12, y: card.midY - 8, width: tw + 12, height: 16)
+            StatusRenderer.codexTeal.withAlphaComponent(0.14).setFill()
+            NSBezierPath(roundedRect: chip, xRadius: 5, yRadius: 5).fill()
+            PanelStyle.draw(model, at: NSPoint(x: chip.minX + 6, y: chip.minY + 2),
+                            font: chipFont, color: .secondaryLabelColor)
+            chipEdge = chip.minX - 8
+        }
+
+        // active / recent tag, left of the chip.
+        let tagFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let tw = ceil(PanelStyle.size(s.status, font: tagFont).width)
+        PanelStyle.draw(s.status, at: NSPoint(x: chipEdge - tw, y: card.midY - 6),
+                        font: tagFont, color: StatusRenderer.codexTeal)
+        chipEdge -= tw + 8
+
+        let nameX = dot.maxX + 8
+        let project = (s.cwd as NSString).lastPathComponent
+        let name = (project.isEmpty ? s.cwd : project) as NSString
+        let nameRect = NSRect(x: nameX, y: card.midY - 8, width: max(0, chipEdge - nameX), height: 16)
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
+        name.draw(with: nameRect, options: [.usesLineFragmentOrigin],
+                  attributes: [.font: nameFont, .foregroundColor: NSColor.labelColor,
+                               .paragraphStyle: para])
+    }
+
+    /// The muted Codex-exec summary row: "+ N Codex exec runs today", with a small
+    /// square teal marker and an "automation" caption.
+    private func renderExec() {
+        let card = NSRect(x: PanelStyle.margin, y: 0,
+                          width: bounds.width - 2 * PanelStyle.margin, height: Self.height - 6)
+        let marker = NSRect(x: card.minX + 9, y: card.midY - 4, width: 8, height: 8)
+        StatusRenderer.codexTeal.withAlphaComponent(0.5).setFill()
+        NSBezierPath(roundedRect: marker, xRadius: 2, yRadius: 2).fill()
+        let label = "+ \(execCount) Codex exec runs today"
+        PanelStyle.draw(label, at: NSPoint(x: marker.maxX + 8, y: card.midY - 7),
+                        font: NSFont.systemFont(ofSize: 11.5), color: .tertiaryLabelColor)
+        let capFont = NSFont.systemFont(ofSize: 10.5)
+        PanelStyle.drawRight("automation \u{00B7} summarized", rightEdge: card.maxX - 9,
+                             y: card.midY - 6, font: capFont, color: .tertiaryLabelColor)
     }
 
     /// Compact token count, same buckets the text rows used.

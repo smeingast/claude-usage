@@ -54,8 +54,9 @@ enum ColorMode: String, CaseIterable {
 enum ProviderRole { case primary, secondary }
 
 /// The menu-bar corner pip's state for the OTHER (secondary) provider, mapped to
-/// a color by amendment 5. Dormant in 4a: no call site draws a pip yet.
-enum PipSeverity {
+/// a color by amendment 5. `Equatable` so the pure state-derivation tests can
+/// assert the resolved severity directly.
+enum PipSeverity: Equatable {
     case red                        // a real >= 90 on that provider's own 5-hour window
     case amber                      // watch / pace, or an attention state:
                                     // Claude signed out, Claude stale, Codex inferred-zero

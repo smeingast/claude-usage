@@ -17,6 +17,12 @@ struct GraphData {
     var projected: Double?
     var crosses: Bool = false
     var crossTime: Date?
+    // Two-provider additions (package 4b). `provider` tints the series in Brand mode
+    // (coral / teal) and drives the "gaps = idle" legend; `forecastIdle` draws the
+    // "forecast pauses (idle)" placeholder when the graphed Codex provider has no
+    // live burn rate. Both default to today's Claude behavior.
+    var provider: UsageProviderKind = .claude
+    var forecastIdle: Bool = false
 
     /// Cheap identity so the view can skip redraws when nothing meaningful changed
     /// (menuNeedsUpdate fires on every menu-tracking tick). The `now / 30` bucket lets a
@@ -30,7 +36,7 @@ struct GraphData {
         let p = projected.map { Int($0.rounded()) } ?? -1
         let r = fiveResetsAt.map { Int($0.timeIntervalSince1970) } ?? 0
         let ct = crossTime.map { Int($0.timeIntervalSince1970) / 60 } ?? -1
-        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(Int(now.timeIntervalSince1970) / 30)"
+        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(provider.rawValue)|\(forecastIdle)|\(Int(now.timeIntervalSince1970) / 30)"
     }
 }
 
@@ -175,13 +181,17 @@ final class HistoryGraphView: NSView {
             return histMaxX + CGFloat(frac) * (plot.maxX - histMaxX)
         }
 
-        // Series ink follows the panel accent: coral in Claude mode, the system
-        // accent in System accent mode, neutral otherwise (tinting a whole time
-        // series by a single current value is not meaningful for thresholds/
-        // heatmap). The readout still carries the colored cue in every mode.
+        // Series ink follows the panel accent: coral (Claude) / teal (Codex) in
+        // Brand mode, the system accent in System accent mode, neutral otherwise
+        // (tinting a whole time series by a single current value is not meaningful
+        // for thresholds/heatmap). The readout still carries the colored cue in every
+        // mode. `provider` only bites in Brand mode; every other mode keeps today's
+        // Claude ink, so the Claude-only graph is unchanged.
         let chromatic = PanelStyle.accentIsChromatic(m.colorMode)
-        let fiveColor = PanelStyle.accent(for: m.colorMode)
-        let weekColor = fiveColor.withAlphaComponent(0.5)
+        let brandCodex = m.colorMode == .brand && m.provider == .codex
+        let fiveColor = brandCodex ? StatusRenderer.codexTeal : PanelStyle.accent(for: m.colorMode)
+        let weekColor = brandCodex ? StatusRenderer.codexTealWeekly.withAlphaComponent(0.5)
+                                   : fiveColor.withAlphaComponent(0.5)
 
         hoverPoints = []
         if m.mode == .utilization {
@@ -222,6 +232,30 @@ final class HistoryGraphView: NSView {
 
         drawReadout(m, in: b, leftAligned: fcActive, plot: plot)
         drawTimeAxis(m, plot: plot, t0: t0, fcActive: fcActive, histMaxX: histMaxX)
+        drawCodexIdleLegends(m, plot: plot)
+    }
+
+    /// Codex-only honesty annotations (amendment 10). When the graphed Codex window
+    /// is idle (no live rate) the forecast is not drawn; label its absence rather than
+    /// imply a projection. The "gaps = idle" note only shows on the 5h/24h ranges,
+    /// where the 48 h backfill makes real idle gaps meaningful (7d/30d gaps can be
+    /// app-off periods). Neither draws for Claude.
+    private func drawCodexIdleLegends(_ m: GraphData, plot: CGRect) {
+        guard m.provider == .codex else { return }
+        let f = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let shortRange = m.range == .last5h || m.range == .last24h
+        if m.forecastIdle && m.mode == .utilization && shortRange {
+            let s = "forecast pauses (idle)"
+            let w = (s as NSString).size(withAttributes: [.font: f]).width
+            drawText(s, at: CGPoint(x: plot.maxX - w, y: plot.midY - 5),
+                     color: .tertiaryLabelColor, font: f)
+        }
+        if shortRange {
+            let s = "gaps = idle"
+            let w = (s as NSString).size(withAttributes: [.font: f]).width
+            drawText(s, at: CGPoint(x: plot.maxX - w, y: plot.minY + 1),
+                     color: .quaternaryLabelColor, font: f)
+        }
     }
 
     /// Dotted projection from (now, current) toward the reset. If it crosses
@@ -375,7 +409,8 @@ final class HistoryGraphView: NSView {
             s.append(NSAttributedString(string: label,
                 attributes: [.font: f, .foregroundColor: NSColor.secondaryLabelColor]))
             let vs = v == nil ? "—" : "\(Int(v!.rounded()))%"
-            let col = v == nil ? NSColor.secondaryLabelColor : StatusRenderer.color(v!, m.colorMode)
+            let col = v == nil ? NSColor.secondaryLabelColor
+                               : StatusRenderer.color(v!, m.colorMode, provider: m.provider)
             s.append(NSAttributedString(string: vs, attributes: [.font: f, .foregroundColor: col]))
         }
         add("5h ", m.fiveNow)
