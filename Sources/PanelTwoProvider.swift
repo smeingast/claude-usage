@@ -103,7 +103,9 @@ enum PanelChip {
     static func width(_ text: String, font: NSFont, kern: CGFloat = 0) -> CGFloat {
         var attrs: [NSAttributedString.Key: Any] = [.font: font]
         if kern != 0 { attrs[.kern] = kern }
-        return ceil((text as NSString).size(withAttributes: attrs).width) + 12
+        // .kern pads after the trailing glyph too; that space is invisible, so it
+        // must not count toward the pill or the text would sit left of center.
+        return ceil(max(0, (text as NSString).size(withAttributes: attrs).width - kern)) + 12
     }
 
     @discardableResult
@@ -112,7 +114,7 @@ enum PanelChip {
                      kern: CGFloat = 0) -> CGFloat {
         var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: textColor]
         if kern != 0 { attrs[.kern] = kern }
-        let tw = (text as NSString).size(withAttributes: attrs).width
+        let tw = max(0, (text as NSString).size(withAttributes: attrs).width - kern)
         let w = ceil(tw) + 12
         let h: CGFloat = 16
         let rect = NSRect(x: x, y: midY - h / 2, width: w, height: h)
@@ -126,7 +128,11 @@ enum PanelChip {
             p.lineWidth = 1
             p.stroke()
         }
-        (text as NSString).draw(at: NSPoint(x: rect.minX + 6, y: midY - font.pointSize / 2 + 1),
+        // Split the ceil slack across both sides, and center the 10 pt cap band in
+        // the 16 pt pill: top at midY - 6 puts the cap center within 0.2 pt of midY
+        // (same placement as the session model chips). midY - 5 + 1 sat 2 pt low.
+        (text as NSString).draw(at: NSPoint(x: rect.minX + (w - tw) / 2,
+                                            y: midY - font.pointSize / 2 - 1),
                                 withAttributes: attrs)
         return w
     }
@@ -391,13 +397,16 @@ final class StripView: NSView {
         // Lead button, right. Drawn first so the text column knows its right edge.
         let leadFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
         let leadText = "\u{21C5} Lead"
-        let leadW = ceil((leadText as NSString).size(withAttributes: [.font: leadFont]).width) + 16
+        let leadTW = (leadText as NSString).size(withAttributes: [.font: leadFont]).width
+        let leadW = ceil(leadTW) + 16
         leadRect = NSRect(x: card.maxX - 11 - leadW, y: card.minY + 10, width: leadW, height: 22)
         NSColor.quaternaryLabelColor.setStroke()
         let leadPath = NSBezierPath(roundedRect: leadRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
         leadPath.lineWidth = 1
         leadPath.stroke()
-        (leadText as NSString).draw(at: NSPoint(x: leadRect.minX + 8, y: leadRect.midY - leadFont.pointSize / 2 - 1),
+        // Center the run in the button so the ceil slack does not all land right.
+        (leadText as NSString).draw(at: NSPoint(x: leadRect.minX + (leadW - leadTW) / 2,
+                                                y: leadRect.midY - leadFont.pointSize / 2 - 1),
                                     withAttributes: [.font: leadFont, .foregroundColor: NSColor.secondaryLabelColor])
 
         let colX = ringRect.maxX + 11
