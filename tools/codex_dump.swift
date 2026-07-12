@@ -12,9 +12,9 @@
 // though this harness never calls them:
 //
 //   swiftc tools/codex_dump.swift \
-//       Sources/CodexUsageClient.swift Sources/Providers.swift \
-//       Sources/JSONLBackscan.swift Sources/UsageClient.swift \
-//       Sources/Keychain.swift \
+//       Sources/CodexUsageClient.swift Sources/CodexSessionsClient.swift \
+//       Sources/Providers.swift Sources/JSONLBackscan.swift \
+//       Sources/UsageClient.swift Sources/Keychain.swift \
 //       -o /tmp/codex_dump && /tmp/codex_dump [ISO8601-after-date]
 //
 // Example: /tmp/codex_dump 2026-07-11T00:00:00Z
@@ -105,5 +105,22 @@ struct CodexDump {
                 print("    \(fmt(ev.timestamp))  primary=\(p) (resets \(fmt(ev.primaryResetsAt)))")
             }
         }
+
+        print("")
+        print("== Codex sessions (live ~/.codex) ==")
+        // Real ~/.codex, read-only; the default process-alive scan runs, so a "codex"
+        // process started for the check shows an interactive session as "active".
+        let sessions = CodexSessionsClient().fetch()
+        if sessions.rows.isEmpty {
+            print("  (no cli rows in the last 24 h)")
+        } else {
+            for r in sessions.rows {
+                let tail = (r.cwd as NSString).lastPathComponent
+                let tok = r.contextTokens.map(String.init) ?? "nil"
+                let win = r.contextWindow.map(String.init) ?? "nil"
+                print("  [\(r.sourceTag ?? "?")] \(r.status)  model=\(r.model ?? "nil")  cwd=\(tail)  ctx=\(tok)/\(win)  updated=\(fmt(r.updatedAt))")
+            }
+        }
+        print("  exec runs today: \(sessions.execRunsToday)")
     }
 }
