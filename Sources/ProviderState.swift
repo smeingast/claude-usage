@@ -7,13 +7,14 @@ import Foundation
 // severity, freshness annotation, and inferred-ring flag originates here.
 //
 // The design source is `design/codex-support/handoff/` (the interactive concept's
-// deriveClaude / deriveCodex) as amended by `handoff-amendments.md`. Copy strings
-// are reproduced VERBATIM from the concept (they are user-facing product copy, and
-// whatever punctuation they carry is intentional); the amendments overrule the
-// concept where they conflict, most notably: freshness uses <= 5 min (amendment 2),
-// the pip/dot severity follows amendment 5, inferred-zero is per-window and dashes
-// only the rolled ring (amendment 9), and the Codex forecast gate is age-based, not
-// process-liveness-based (amendment 2).
+// deriveClaude / deriveCodex) as amended by `handoff-amendments.md`. The Claude
+// warning copy is reproduced verbatim from the concept; the Codex copy is terse
+// middot-joined fragments (amendment 20, overruling the concept's prose), and the
+// calm normal state carries no banner message at all for either provider
+// (amendment 19). The amendments also overrule the concept on: freshness <= 5 min
+// (amendment 2), pip/dot severity (amendment 5), per-window inferred-zero with only
+// the rolled ring dashed (amendment 9), and the age-based (not process-liveness)
+// Codex forecast gate (amendment 2).
 
 /// Which chain state a provider resolved to. The two providers share the tail
 /// (red/pace/watch/normal) but head differently: Claude carries auth/staleness,
@@ -125,6 +126,21 @@ enum ProviderState {
         }
     }
 
+    // MARK: - Bar pip filter (amendment 23)
+
+    /// The severity the BAR may draw as its corner pip / percentages bullet, or nil
+    /// for no pip at all. Amendment 23 (Stefan's live feedback): the bar pip is a
+    /// WARNING LIGHT only; a calm teal dot next to the rings reads as noise. Red and
+    /// amber pass through; calm, muted, and hidden draw nothing. Amendment 5's full
+    /// severity-to-color table is untouched: the panel banner/strip dots still render
+    /// every state, so calm and muted stay visible where there is room for them.
+    nonisolated static func barPip(_ s: PipSeverity) -> PipSeverity? {
+        switch s {
+        case .red, .amber:            return s
+        case .calm, .muted, .hidden:  return nil
+        }
+    }
+
     // MARK: - Claude derivation
 
     /// Resolve the Claude instrument state for two-provider mode. Chain (unchanged
@@ -132,7 +148,8 @@ enum ProviderState {
     /// is the app's "Stale -- <error>" condition (a later poll failed but the prior
     /// snapshot still stands); `observedAt` is that snapshot's fetch time, used for
     /// the stale age. `forecast` supplies pace crossing and the projected settle
-    /// value. Copy is verbatim from the concept's deriveClaude.
+    /// value. The warning copy is verbatim from the concept's deriveClaude; the calm
+    /// normal state returns an empty message (amendment 19: no banner).
     nonisolated static func deriveClaude(
         five: Double?, week: Double?,
         fiveResetsAt: Date?, weekResetsAt: Date?,
@@ -180,7 +197,9 @@ enum ProviderState {
         case .watch:
             msg = "\(pctInt(five))% used, \(100 - pctInt(five)) to go. About \(projSettle)% by the \(hmOrDash(fiveResetsAt, hm)) reset \u{2014} still clear."
         case .normal:
-            msg = "At this pace the 5-hour window settles near \(projSettle)% before it resets at \(hmOrDash(fiveResetsAt, hm)). Plenty of headroom."
+            // Amendment 19: the calm normal state carries no banner at all. An empty
+            // message is the "no banner row" signal to the panel layout.
+            msg = ""
         }
 
         let pip: PipSeverity = {
@@ -202,7 +221,9 @@ enum ProviderState {
     /// `result` is the usage poll; `forecast` is computed over the Codex history and
     /// gated here (rate > 0 AND newest sample <= 12 min AND reset in the future) per
     /// the brief. Inferred-zero is per-window via `effectiveUtilization` (amendment
-    /// 9). Copy is verbatim from the concept's deriveCodex.
+    /// 9). Copy is terse middot-joined fragments (amendment 20, overruling the
+    /// concept's prose), and the fresh normal state carries no message at all
+    /// (amendment 19).
     nonisolated static func deriveCodex(
         result: CodexUsageResult, forecast: Forecast?,
         now: Date, hm: DateFormatter) -> CodexDerived {
@@ -213,11 +234,11 @@ enum ProviderState {
             return blankCodex(kind: .notInstalled, installed: false,
                               msg: "", ageLine: "", pip: .hidden)
         }
-        // Installed but nothing logged yet.
+        // Installed but nothing logged yet (terse per amendment 20).
         guard result.status == .ok, let snap = result.snapshot else {
             return blankCodex(
                 kind: .noData, installed: true,
-                msg: "Codex is installed but hasn\u{2019}t logged usage yet. Run a Codex session to populate this.",
+                msg: "Installed, no usage logged yet \u{00B7} run a Codex session.",
                 ageLine: "No usage data yet", pip: .muted)
         }
 
@@ -273,33 +294,42 @@ enum ProviderState {
         }()
 
         let projSettle = pctInt(projFive ?? five)
+        // Codex copy is TERSE (amendment 20): short middot-joined fragments, not
+        // prose; the concept's verbatim sentences are overruled for Codex. A fresh
+        // normal state returns "" (amendment 19: no banner in the calm state).
         var msg: String = {
             if inferredFive {
                 let passed = snap.primary?.resetsAt
-                return "No Codex activity since the window reset at \(hmOrDash(passed, hm)). The log still reads \(pctInt(rawFive))%; the honest value is 0% \u{2014} it starts fresh, resets \(hmOrDash(nextReset, hm))."
+                return "Window reset \(hmOrDash(passed, hm)) passed idle \u{00B7} reads 0% until Codex runs \u{00B7} next reset \(hmOrDash(nextReset, hm))."
             }
             if !fresh {
-                return "Reading is a snapshot from \(hmOrDash(observedAt, hm)) (\(relAge(ageSec))), when Codex last wrote. It\u{2019}s idle now, so there\u{2019}s no live burn rate to forecast."
+                return "Idle since \(hmOrDash(observedAt, hm)) (\(relAge(ageSec))) \u{00B7} forecast paused."
             }
             switch kind {
             case .red:
-                return "Red zone \u{2014} \(100 - pctInt(five))% headroom left on Codex\u{2019}s 5-hour window. Resets \(hmOrDash(fiveResetsAt, hm))."
+                return "Red zone \u{00B7} \(100 - pctInt(five))% headroom \u{00B7} resets \(hmOrDash(fiveResetsAt, hm))."
             case .pace:
-                return "At this pace Codex reaches 100% around \(hmOrDash(crossTime, hm)), before the \(hmOrDash(fiveResetsAt, hm)) reset."
+                return "On pace for 100% ~\(hmOrDash(crossTime, hm)) \u{00B7} resets \(hmOrDash(fiveResetsAt, hm))."
             case .watch:
-                return "\(pctInt(five))% used on Codex, \(100 - pctInt(five)) to go. About \(projSettle)% by the \(hmOrDash(fiveResetsAt, hm)) reset."
+                return "\(pctInt(five))% used \u{00B7} ~\(projSettle)% by the \(hmOrDash(fiveResetsAt, hm)) reset."
             default:
-                return "Codex at \(pctInt(five))% of its 5-hour window, resets \(hmOrDash(fiveResetsAt, hm)) (in \(relToDash(fiveResetsAt, now))). Weekly \(pctInt(week))%."
+                return ""
             }
         }()
-        // A weekly-only roll (amendment 9: inferred-zero is per-window) gets its own
-        // sentence, appended to whichever base copy leads: the chain stays keyed on
-        // the 5-hour window, but the rolled weekly window must still be named. When
-        // BOTH windows rolled, the 5-hour inferred copy above already leads and the
-        // weekly is visible as the struck figure + dashed ring.
+        // A weekly-only roll (amendment 9: inferred-zero is per-window) is appended
+        // to whatever message is showing: the chain stays keyed on the 5-hour window,
+        // but the rolled weekly window must still be named. On an empty base (fresh
+        // normal, which shows no banner of its own) the fragment stands alone,
+        // capitalized, so the weekly caveat still forces a banner (amendment 19
+        // removes only the CALM banner, never an honesty caveat). When BOTH windows
+        // rolled, the 5-hour inferred copy above leads and the weekly roll stays
+        // visible as its dashed ring + struck figure.
         if inferredWeek && !inferredFive {
-            let passedWeek = snap.secondary?.resetsAt
-            msg += " No Codex activity since the weekly window reset at \(hmOrDash(passedWeek, hm)); the honest weekly value is 0%, not the logged \(pctInt(rawWeek))%."
+            if msg.isEmpty {
+                msg = "Weekly reset passed, weekly reads 0%."
+            } else {
+                msg += " \u{00B7} weekly reset passed, weekly reads 0%."
+            }
         }
 
         // Pip / banner-dot severity (amendment 5): inferred-zero (EITHER window;

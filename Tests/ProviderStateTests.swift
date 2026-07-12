@@ -60,13 +60,14 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertTrue(d.installed)
         XCTAssertFalse(d.hasData)
         XCTAssertEqual(d.ageLine, "No usage data yet")
-        XCTAssertEqual(d.msg, "Codex is installed but hasn\u{2019}t logged usage yet. Run a Codex session to populate this.")
+        XCTAssertEqual(d.msg, "Installed, no usage logged yet \u{00B7} run a Codex session.")
         XCTAssertEqual(d.pip, .muted)
     }
 
     func testCodexInferredZeroWinsOverEverything() {
-        // 5-hour reset passed 74 min ago, no newer event: the honest value is 0,
-        // the rolled ring is dashed, and the old 71% is named in the copy.
+        // 5-hour reset passed 74 min ago, no newer event: the honest value is 0, the
+        // rolled ring is dashed, and the terse copy (amendment 20) names the passed
+        // and next resets; the old 71% survives as rawFive for the struck figure.
         let d = ProviderState.deriveCodex(
             result: codexResult(five: 71, week: 14,
                                 fiveReset: utcDate(2026, 1, 2, 10, 46),
@@ -81,7 +82,7 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertFalse(d.forecastActive)          // no forecast on a rolled window
         XCTAssertEqual(d.pip, .amber)
         XCTAssertEqual(d.ageLine, "as of 11:17")
-        XCTAssertEqual(d.msg, "No Codex activity since the window reset at 10:46. The log still reads 71%; the honest value is 0% \u{2014} it starts fresh, resets 15:46.")
+        XCTAssertEqual(d.msg, "Window reset 10:46 passed idle \u{00B7} reads 0% until Codex runs \u{00B7} next reset 15:46.")
     }
 
     func testCodexRedZone() {
@@ -94,7 +95,7 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertEqual(d.kind, .red)
         XCTAssertTrue(d.isRed)
         XCTAssertEqual(d.pip, .red)
-        XCTAssertEqual(d.msg, "Red zone \u{2014} 7% headroom left on Codex\u{2019}s 5-hour window. Resets 12:38.")
+        XCTAssertEqual(d.msg, "Red zone \u{00B7} 7% headroom \u{00B7} resets 12:38.")
     }
 
     func testCodexPace() {
@@ -109,7 +110,7 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertEqual(d.kind, .pace)
         XCTAssertTrue(d.forecastActive)
         XCTAssertEqual(d.pip, .amber)
-        XCTAssertEqual(d.msg, "At this pace Codex reaches 100% around 13:00, before the 14:30 reset.")
+        XCTAssertEqual(d.msg, "On pace for 100% ~13:00 \u{00B7} resets 14:30.")
     }
 
     func testCodexWatch() {
@@ -121,7 +122,7 @@ final class ProviderStateTests: XCTestCase {
             forecast: fc(11, projected: 84, crosses: false), now: now, hm: hm())
         XCTAssertEqual(d.kind, .watch)
         XCTAssertEqual(d.pip, .amber)
-        XCTAssertEqual(d.msg, "76% used on Codex, 24 to go. About 84% by the 13:35 reset.")
+        XCTAssertEqual(d.msg, "76% used \u{00B7} ~84% by the 13:35 reset.")
     }
 
     func testCodexNormalFresh() {
@@ -136,7 +137,8 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertFalse(d.aged)
         XCTAssertEqual(d.pip, .calm(.codex))
         XCTAssertEqual(d.ageLine, "as of 11:56")
-        XCTAssertEqual(d.msg, "Codex at 19% of its 5-hour window, resets 16:35 (in 4h 35m). Weekly 14%.")
+        // Amendment 19: the calm fresh normal state carries no banner message.
+        XCTAssertEqual(d.msg, "")
     }
 
     func testCodexAgedIdle() {
@@ -153,7 +155,7 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertEqual(d.pip, .muted)             // aged-idle -> gray (amendment 5)
         XCTAssertTrue(d.ageWarn)
         XCTAssertEqual(d.ageLine, "as of 08:47 \u{00B7} 3h 13m ago")
-        XCTAssertEqual(d.msg, "Reading is a snapshot from 08:47 (3h 13m ago), when Codex last wrote. It\u{2019}s idle now, so there\u{2019}s no live burn rate to forecast.")
+        XCTAssertEqual(d.msg, "Idle since 08:47 (3h 13m ago) \u{00B7} forecast paused.")
     }
 
     // MARK: - Weekly-only inferred zero (amendment 9: per-window, first-class)
@@ -162,8 +164,8 @@ final class ProviderStateTests: XCTestCase {
         // Only the weekly reset has passed: the chain stays keyed on the 5-hour
         // window (kind normal, no 5-hour strike), but the weekly window rolls to an
         // honest 0 with its raw figure carried for the strike, the pip goes amber
-        // (amendment 5 lists "Codex inferred-zero" unqualified), and the copy names
-        // the weekly reset.
+        // (amendment 5 lists "Codex inferred-zero" unqualified), and the copy
+        // carries the terse weekly caveat (amendment 20).
         let d = ProviderState.deriveCodex(
             result: codexResult(five: 19, week: 14,
                                 fiveReset: utcDate(2026, 1, 2, 16, 35),
@@ -178,7 +180,10 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertEqual(d.rawWeek, 14)             // carried for the struck figure
         XCTAssertEqual(d.pip, .amber)
         XCTAssertTrue(d.forecastActive)           // the live 5-hour window still forecasts
-        XCTAssertEqual(d.msg, "Codex at 19% of its 5-hour window, resets 16:35 (in 4h 35m). Weekly 0%. No Codex activity since the weekly window reset at 10:46; the honest weekly value is 0%, not the logged 14%.")
+        // The fresh normal base is empty (amendment 19), so the terse weekly
+        // fragment (amendment 20) stands alone, capitalized: the weekly caveat
+        // still forces a banner.
+        XCTAssertEqual(d.msg, "Weekly reset passed, weekly reads 0%.")
     }
 
     func testCodexBothInferredLeadsWithFiveCopy() {
@@ -195,7 +200,7 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertTrue(d.inferredWeek)
         XCTAssertEqual(d.rawWeek, 14)
         XCTAssertEqual(d.pip, .amber)
-        XCTAssertEqual(d.msg, "No Codex activity since the window reset at 10:46. The log still reads 71%; the honest value is 0% \u{2014} it starts fresh, resets 15:46.")
+        XCTAssertEqual(d.msg, "Window reset 10:46 passed idle \u{00B7} reads 0% until Codex runs \u{00B7} next reset 15:46.")
     }
 
     // MARK: - Fresh / aged boundary (amendment 2: fresh = age <= 5 min)
@@ -325,7 +330,8 @@ final class ProviderStateTests: XCTestCase {
         XCTAssertEqual(d.kind, .normal)
         XCTAssertEqual(d.ageLine, "Updated 12:00")
         XCTAssertTrue(d.pip == .calm(.claude))
-        XCTAssertEqual(d.msg, "At this pace the 5-hour window settles near 55% before it resets at 14:35. Plenty of headroom.")
+        // Amendment 19: the calm normal state carries no banner message.
+        XCTAssertEqual(d.msg, "")
     }
 
     // MARK: - Status line (amendment 12)
@@ -377,6 +383,21 @@ final class ProviderStateTests: XCTestCase {
                        "1 active session")
         XCTAssertEqual(ProviderState.sessionsHeader(claudeCount: 3, codexCount: 2, twoProvider: false),
                        "3 active sessions")
+    }
+
+    // MARK: - Bar pip filter (amendment 23)
+
+    func testBarPipIsWarningLightOnly() {
+        // The bar pip is a warning light: red and amber pass through untouched;
+        // calm (either provider), muted, and hidden yield nil (no pip drawn).
+        // Amendment 5's severity table stays intact for the panel dots; this filter
+        // applies at the bar rendering layer only.
+        XCTAssertEqual(ProviderState.barPip(.red), .red)
+        XCTAssertEqual(ProviderState.barPip(.amber), .amber)
+        XCTAssertNil(ProviderState.barPip(.calm(.codex)))
+        XCTAssertNil(ProviderState.barPip(.calm(.claude)))
+        XCTAssertNil(ProviderState.barPip(.muted))
+        XCTAssertNil(ProviderState.barPip(.hidden))
     }
 
     // MARK: - Show Codex resolution

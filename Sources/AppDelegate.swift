@@ -416,8 +416,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         graphProvider = Settings.primaryProvider
         graphProviderView.selected = graphProvider
 
+        // The banner row exists only for states that carry a warning or an honesty
+        // caveat (amendment 19): a calm normal primary derives an EMPTY message, and
+        // an empty message means no banner row at all. Resolved per open like the
+        // strip sub-banner; a mid-open state change waits for the next open.
+        let primaryMsg = (Settings.primaryProvider == .claude ? claudeDerived?.msg : codexDerived?.msg) ?? ""
         tagRowItem.isHidden = !twoProvider
-        bannerItem.isHidden = !twoProvider
+        bannerItem.isHidden = !twoProvider || primaryMsg.isEmpty
         stripItem.isHidden = !twoProvider
         graphProviderItem.isHidden = !twoProvider
 
@@ -430,10 +435,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showCodexRootItem.isHidden = !installed
 
         guard twoProvider else { return }
-        // Freeze this open's heights from the primary banner text and the secondary
-        // strip model (its sub-banner, when present, drives the strip height).
-        let primaryMsg = (Settings.primaryProvider == .claude ? claudeDerived?.msg : codexDerived?.msg) ?? ""
-        resize(bannerView, height: BannerView.height(for: primaryMsg, viewWidth: PanelStyle.width))
+        // Freeze this open's heights from the primary banner text (when a banner was
+        // allocated at all) and the secondary strip model (its sub-banner, when
+        // present, drives the strip height).
+        if !primaryMsg.isEmpty {
+            resize(bannerView, height: BannerView.height(for: primaryMsg, viewWidth: PanelStyle.width))
+        }
         resize(stripView, height: StripView.height(for: secondaryStripModel(), viewWidth: PanelStyle.width))
     }
 
@@ -682,9 +689,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let xInfF = codexDerived?.inferredFive ?? false
         let xInfW = codexDerived?.inferredWeek ?? false
         let xProj = (codexDerived?.forecastActive ?? false) ? codexDerived?.projFive : nil
-        // The pip carries the OTHER provider (relative to the primary glyph).
-        let otherPip = primary == .claude ? (codexDerived?.pip ?? .hidden)
-                                          : (claudeDerived?.pip ?? .hidden)
+        // The pip carries the OTHER provider (relative to the primary glyph),
+        // filtered to a WARNING LIGHT (amendment 23): only red/amber survive to the
+        // corner pip / percentages bullet; calm and muted draw no pip at all (a calm
+        // teal dot next to the rings read as noise on Stefan's live bar). The panel
+        // banner/strip dots keep amendment 5's full table. The filter sits here at
+        // the single definition both bar call sites (image pip, percentText pip)
+        // consume, so no unfiltered severity can reach the bar.
+        let otherPip = ProviderState.barPip(
+            primary == .claude ? (codexDerived?.pip ?? .hidden)
+                               : (claudeDerived?.pip ?? .hidden))
 
         if style == .percentages {
             let attr: NSAttributedString

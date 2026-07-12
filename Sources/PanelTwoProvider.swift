@@ -97,6 +97,15 @@ enum PanelRings {
 /// Small pill/chip painters shared by the tag row and strip. Each returns the drawn
 /// width so callers can lay chips left-to-right.
 enum PanelChip {
+    /// The width `draw` will occupy, WITHOUT drawing. The chip rows measure against
+    /// the age line's left edge before committing to a chip (amendment 21), so the
+    /// width math must live in one place and stay identical to `draw`'s.
+    static func width(_ text: String, font: NSFont, kern: CGFloat = 0) -> CGFloat {
+        var attrs: [NSAttributedString.Key: Any] = [.font: font]
+        if kern != 0 { attrs[.kern] = kern }
+        return ceil((text as NSString).size(withAttributes: attrs).width) + 12
+    }
+
     @discardableResult
     static func draw(_ text: String, at x: CGFloat, midY: CGFloat, font: NSFont,
                      fill: NSColor?, textColor: NSColor, bordered: Bool = false,
@@ -167,25 +176,41 @@ final class TagRowView: NSView {
         guard let m = model else { return }
         let midY = bounds.height / 2
         let accent = StatusRenderer.providerAccent(m.provider)
-        let tagFont = NSFont.systemFont(ofSize: 10, weight: .bold)
+
+        // The age line owns the right edge (amendment 21, seen live: a long "as of
+        // HH:MM · Nm ago" drew over the local chip). Its left edge is computed FIRST,
+        // and chips are then laid left-to-right only while they clear it by >= 8 pt.
+        // Priority when space runs out: the local chip drops first, the plan chip
+        // next, the provider chip last; the age line is never drawn over a chip.
+        let ageFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        let ageW = ceil(PanelStyle.size(m.ageLine, font: ageFont).width)
+        let ageLeft = bounds.width - PanelStyle.margin - ageW
+        let clearance: CGFloat = 8
+
         var x = PanelStyle.margin
         // Provider chip: uppercase, on a soft accent wash.
-        x += PanelChip.draw(m.label.uppercased(), at: x, midY: midY, font: tagFont,
-                            fill: accent.withAlphaComponent(0.14), textColor: accent, kern: 0.4)
-        x += 5
+        let tagFont = NSFont.systemFont(ofSize: 10, weight: .bold)
+        if x + PanelChip.width(m.label.uppercased(), font: tagFont, kern: 0.4) <= ageLeft - clearance {
+            x += PanelChip.draw(m.label.uppercased(), at: x, midY: midY, font: tagFont,
+                                fill: accent.withAlphaComponent(0.14), textColor: accent, kern: 0.4)
+            x += 5
+        }
         if let plan = m.planType, !plan.isEmpty {
             let planFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
-            x += PanelChip.draw(plan, at: x, midY: midY, font: planFont,
-                                fill: PanelStyle.chip, textColor: .secondaryLabelColor)
-            x += 5
+            if x + PanelChip.width(plan, font: planFont) <= ageLeft - clearance {
+                x += PanelChip.draw(plan, at: x, midY: midY, font: planFont,
+                                    fill: PanelStyle.chip, textColor: .secondaryLabelColor)
+                x += 5
+            }
         }
         if m.showLocalChip {
             let localFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
-            x += PanelChip.draw("\u{24D8} local", at: x, midY: midY, font: localFont,
-                                fill: nil, textColor: .tertiaryLabelColor, bordered: true)
+            if x + PanelChip.width("\u{24D8} local", font: localFont) <= ageLeft - clearance {
+                PanelChip.draw("\u{24D8} local", at: x, midY: midY, font: localFont,
+                               fill: nil, textColor: .tertiaryLabelColor, bordered: true)
+            }
         }
         // Age line, right-aligned; amber when the reading is stale/aged.
-        let ageFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         PanelStyle.drawRight(m.ageLine, rightEdge: bounds.width - PanelStyle.margin,
                              y: midY - ageFont.pointSize / 2 - 1, font: ageFont,
                              color: m.ageWarn ? .systemOrange : .tertiaryLabelColor)
@@ -247,6 +272,11 @@ final class BannerView: NSView {
 
     private func render() {
         guard let m = model else { return }
+        // An empty message means "no banner" (amendment 19). The row itself is hidden
+        // per-open, but a mid-open state change can hand an allocated banner an empty
+        // message; blank space beats an empty card with a lone dot until the next
+        // open resolves the row away.
+        guard !m.text.isEmpty else { return }
         let card = NSRect(x: PanelStyle.margin, y: 4,
                           width: bounds.width - 2 * PanelStyle.margin,
                           height: bounds.height - 6)
@@ -336,13 +366,14 @@ final class StripView: NSView {
 
     private func render() {
         guard let m = model else { return }
+        // The strip renders BORDERLESS (amendment 22, Stefan's live feedback): no
+        // rounded-rect around the card, visually consistent with the primary panel
+        // content. `card` survives purely as the layout rectangle; the Lead button
+        // keeps its own small border (it is a button) and the sub-banner keeps its
+        // hairline separator.
         let card = NSRect(x: PanelStyle.margin, y: 11,
                           width: bounds.width - 2 * PanelStyle.margin,
                           height: bounds.height - 11)
-        PanelStyle.chip.withAlphaComponent(0.5).setStroke()
-        let border = NSBezierPath(roundedRect: card.insetBy(dx: 0.5, dy: 0.5), xRadius: 11, yRadius: 11)
-        border.lineWidth = 1
-        border.stroke()
 
         let mainMidY = card.minY + StripView.mainRowHeight / 2
         // 40 pt rings, left.
@@ -370,26 +401,42 @@ final class StripView: NSView {
         let colX = ringRect.maxX + 11
         let colRight = leadRect.minX - 10
 
-        // Chips + age line (top line of the column).
+        // Chips + age line (top line of the column). The age line owns the right
+        // edge (amendment 21): its left edge is computed FIRST, and chips draw
+        // left-to-right only while they clear it by >= 8 pt. Priority when space
+        // runs out: the local chip drops first, the plan chip next, the provider
+        // chip last; the age line is never drawn over a chip.
         let chipMidY = card.minY + 14
         let accent = StatusRenderer.providerAccent(m.provider)
+        let ageFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        let ageW = ceil(PanelStyle.size(m.ageLine, font: ageFont).width)
+        let ageLeft = colRight - ageW
+        let clearance: CGFloat = 8
+
         var cx = colX
-        cx += PanelChip.draw(m.label.uppercased(), at: cx, midY: chipMidY,
-                             font: NSFont.systemFont(ofSize: 10, weight: .bold),
-                             fill: nil, textColor: accent, kern: 0.4)
-        cx += 4
-        if let plan = m.planType, !plan.isEmpty {
-            cx += PanelChip.draw(plan, at: cx, midY: chipMidY,
-                                 font: NSFont.systemFont(ofSize: 9.5, weight: .semibold),
-                                 fill: PanelStyle.chip, textColor: .secondaryLabelColor)
+        let provFont = NSFont.systemFont(ofSize: 10, weight: .bold)
+        if cx + PanelChip.width(m.label.uppercased(), font: provFont, kern: 0.4) <= ageLeft - clearance {
+            cx += PanelChip.draw(m.label.uppercased(), at: cx, midY: chipMidY,
+                                 font: provFont, fill: nil, textColor: accent, kern: 0.4)
             cx += 4
         }
-        if m.showLocalChip {
-            _ = PanelChip.draw("\u{24D8} local", at: cx, midY: chipMidY,
-                               font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                               fill: nil, textColor: .tertiaryLabelColor, bordered: true)
+        if let plan = m.planType, !plan.isEmpty {
+            let planFont = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+            if cx + PanelChip.width(plan, font: planFont) <= ageLeft - clearance {
+                cx += PanelChip.draw(plan, at: cx, midY: chipMidY,
+                                     font: planFont, fill: PanelStyle.chip,
+                                     textColor: .secondaryLabelColor)
+                cx += 4
+            }
         }
-        let ageFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        if m.showLocalChip {
+            let localFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+            if cx + PanelChip.width("\u{24D8} local", font: localFont) <= ageLeft - clearance {
+                PanelChip.draw("\u{24D8} local", at: cx, midY: chipMidY,
+                               font: localFont, fill: nil, textColor: .tertiaryLabelColor,
+                               bordered: true)
+            }
+        }
         PanelStyle.drawRight(m.ageLine, rightEdge: colRight, y: chipMidY - ageFont.pointSize / 2 - 1,
                              font: ageFont, color: m.ageWarn ? .systemOrange : .tertiaryLabelColor)
 
