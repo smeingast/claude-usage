@@ -71,6 +71,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastHistoryAppendAt = Date.distantPast
     private var lastDiskTrimAt = Date()                        // launch task trims; recordHistory re-trims ~daily
 
+    // Codex, the second provider. Polled and recorded on its OWN gate, fully
+    // isolated from the Claude path above: it never reads or writes isFetching,
+    // lastFetchAt, cooldownUntil, or needsAuth. Read-only local file I/O against
+    // ~/.codex, no auth, no network. Package 2 stores and records only; nothing here
+    // is rendered yet. `codexScanHighWater` is the newest event timestamp SEEN across
+    // polls (kept or dropped), tracked in-memory so later polls do not re-read events
+    // the decimator already discarded; it is separate from the last STORED sample.
+    private let codexClient = CodexUsageClient()
+    private var codexUsage: CodexUsageResult?
+    private var codexHistory: [HistorySample] = []
+    private let codexHistoryStore = HistoryStore(filename: "history-codex.jsonl")
+    private var isFetchingCodex = false
+    private var lastCodexFetchAt = Date.distantPast
+    private let codexMinFetchGap: TimeInterval = 20
+    private var codexScanHighWater = Date.distantPast
+    private var lastCodexDiskTrimAt = Date()                   // launch task trims; ingest re-trims ~daily
+
     private let barFont = NSFont.monospacedDigitSystemFont(
         ofSize: NSFont.systemFontSize, weight: .regular)
 
@@ -136,6 +153,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.applyGraphData()
             }
             store.trim(maxAge: maxAge)
+        }
+
+        // Prime the Codex history the same detached way, into the codex store/list, so
+        // the decimator is seeded from the last stored codex sample before the first
+        // codex poll can record a too-close one. Trim the codex file at launch too.
+        //
+        // The first codex poll is launched HERE, inside the merge continuation and only
+        // AFTER codexHistory holds the stored samples, not from the block below. The
+        // ordering is load-bearing: refreshCodex's collect cutoff is
+        // max(codexScanHighWater, codexHistory.last?.t), and at launch codexScanHighWater
+        // is still .distantPast. Were the poll to run before this merge, the cutoff would
+        // be .distantPast and the first backfill would re-read every sample already on
+        // disk and re-append it. Merge first, poll second, and a launch can never
+        // backfill from .distantPast or duplicate stored samples.
+        let codexStore = codexHistoryStore
+        Task.detached(priority: .utility) {
+            let loaded = codexStore.load(maxAge: maxAge)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.codexHistory = self.mergeHistory(loaded, self.codexHistory)
+                self.refreshCodex(force: true)
+            }
+            codexStore.trim(maxAge: maxAge)
         }
 
         startTimer()
@@ -248,6 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         refreshNow()                        // freshen on open (gated by minFetchGap)
         refreshSessions()                   // re-read local sessions (gated by sessionsMinGap)
+        refreshCodex()                      // freshen Codex on open (its own 20s gate)
     }
 
     // MARK: - Fetching
@@ -257,13 +298,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in
                 self?.refreshNow()
                 self?.refreshSessions()
+                self?.refreshCodex()
             }
         }
         t.tolerance = 15                    // let the OS coalesce wakeups
         timer = t
     }
 
-    @objc private func systemDidWake() { refreshNow(); refreshSessions() }
+    @objc private func systemDidWake() { refreshNow(); refreshSessions(); refreshCodex() }
 
     // Timer / wake / menu-open: respect the gates (gap + 429 cooldown).
     @objc private func refreshNow() { performFetch(force: false) }
@@ -330,6 +372,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.sessions = list
                 self.isReadingSessions = false
                 self.renderSessions()
+            }
+        }
+    }
+
+    // Poll Codex on its OWN gate, fully isolated from the Claude fetch. Cheap
+    // read-only file I/O off the main actor (like refreshSessions), hopping to the
+    // main actor only to store the snapshot and record history. Package 2 renders
+    // nothing: the results are stored and the history recorded for later packages.
+    // The collect cutoff is max(scanHighWater, lastStored): the high-water keeps us
+    // from re-reading events the decimator already dropped, while the last stored
+    // sample bounds a fresh launch before any high-water has been observed.
+    private func refreshCodex(force: Bool = false) {
+        guard !isFetchingCodex else { return }
+        let now = Date()
+        if !force, now < lastCodexFetchAt.addingTimeInterval(codexMinFetchGap) { return }
+        isFetchingCodex = true
+        lastCodexFetchAt = now
+        let client = codexClient
+        let cutoff = max(codexScanHighWater, codexHistory.last?.t ?? .distantPast)
+        Task.detached(priority: .utility) {
+            let result = client.fetch()
+            let events = client.backfillEvents(after: cutoff)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                defer { self.isFetchingCodex = false }
+                self.codexUsage = result
+                self.ingestCodexEvents(events)
             }
         }
     }
@@ -575,6 +644,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Merge two sample lists, de-duplicating by whole-second timestamp (`b` wins), sorted.
     private func mergeHistory(_ a: [HistorySample], _ b: [HistorySample]) -> [HistorySample] {
+        Self.mergeHistorySamples(a, b)
+    }
+
+    /// The body of `mergeHistory`, factored out pure and nonisolated (same pattern as
+    /// `decimateCodex`) so the history tests can drive it without a live menu. The
+    /// instance method above delegates here, so every existing call site is
+    /// byte-identical: de-duplicate by whole-second timestamp (later argument, i.e. the
+    /// second element of a colliding pair, wins), returned ascending by time.
+    nonisolated static func mergeHistorySamples(_ a: [HistorySample],
+                                                _ b: [HistorySample]) -> [HistorySample] {
         var byT: [Int: HistorySample] = [:]
         for s in a { byT[Int(s.t.timeIntervalSince1970.rounded())] = s }
         for s in b { byT[Int(s.t.timeIntervalSince1970.rounded())] = s }
@@ -585,6 +664,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cutoff = Date().addingTimeInterval(-historyMaxAge)
         if let first = history.first?.t, first < cutoff {
             history.removeAll { $0.t < cutoff }
+        }
+    }
+
+    // MARK: - Codex history
+
+    /// Fold a batch of backfill events (chronological) into the codex history:
+    /// advance the in-memory scan high-water past every event SEEN (kept, decimated,
+    /// or dropped as a stray) so later polls do not re-read them, drop isolated
+    /// stray-anchor readings, greedily decimate to the ~5-min grid, then persist and
+    /// merge the survivors. Samples are stamped with the EVENT time.
+    private func ingestCodexEvents(_ events: [CodexUsageClient.Event]) {
+        guard let newest = events.last?.timestamp else { return }   // ascending: last is newest
+        codexScanHighWater = max(codexScanHighWater, newest)
+
+        // Stray-anchor run filter on the RAW batch, before decimation: runs caught
+        // between two runs of the same anchor cluster are exec-subagent strays, not
+        // rollovers, when their own cluster is strictly outnumbered batch-wide (see
+        // CodexUsageClient.filterStrays for the population-weighted span rule).
+        let cleaned = CodexUsageClient.filterStrays(events)
+
+        let lastKept = codexHistory.last?.t ?? .distantPast
+        let kept = Self.decimateCodex(events: cleaned, lastKept: lastKept, minGap: minSampleGap)
+        guard !kept.isEmpty else { return }
+
+        let store = codexHistoryStore
+        Task.detached(priority: .utility) { for s in kept { store.append(s) } }
+        codexHistory = mergeHistory(codexHistory, kept)
+        trimCodexHistoryInMemory()
+        // Keep the on-disk codex file bounded across long uptimes too, mirroring
+        // recordHistory's ~daily re-trim of the Claude store. Keyed on WALL CLOCK, not
+        // the kept sample's event time: during a backfill the newest kept event can lag
+        // hours (or days) behind now, which would defer the trim indefinitely and let
+        // the file grow, the pre-v0.8 launch-only-trim growth bug in new clothes.
+        if Date().timeIntervalSince(lastCodexDiskTrimAt) > 24 * 3600 {
+            lastCodexDiskTrimAt = Date()
+            let maxAge = historyMaxAge
+            Task.detached(priority: .utility) { store.trim(maxAge: maxAge) }
+        }
+    }
+
+    /// Greedy decimation of chronological Codex events into history samples: keep an
+    /// event iff its timestamp is at least `minGap` after the last KEPT sample,
+    /// seeded with `lastKept` (the last already-stored sample time, or .distantPast).
+    /// Even spacing by construction, so no seconds-apart neighbors survive. Values
+    /// pass straight through, resets included: there is no rise math here, so a window
+    /// reset between neighbors can never manufacture a negative downstream. Pure and
+    /// nonisolated so the backfill tests drive it without a live menu.
+    nonisolated static func decimateCodex(events: [CodexUsageClient.Event], lastKept: Date,
+                                          minGap: TimeInterval) -> [HistorySample] {
+        var last = lastKept
+        var out: [HistorySample] = []
+        for ev in events {
+            guard ev.timestamp >= last.addingTimeInterval(minGap) else { continue }
+            last = ev.timestamp
+            out.append(HistorySample(t: ev.timestamp, five: ev.primaryPercent,
+                                     week: ev.secondaryPercent,
+                                     fiveResetsAt: ev.primaryResetsAt,
+                                     weekResetsAt: ev.secondaryResetsAt))
+        }
+        return out
+    }
+
+    private func trimCodexHistoryInMemory() {
+        let cutoff = Date().addingTimeInterval(-historyMaxAge)
+        if let first = codexHistory.first?.t, first < cutoff {
+            codexHistory.removeAll { $0.t < cutoff }
         }
     }
 

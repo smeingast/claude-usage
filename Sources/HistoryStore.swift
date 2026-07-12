@@ -21,14 +21,21 @@ final class HistoryStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "eu.smeingast.claude-menubar-usage.history")
     private let fileURL: URL?
 
-    init() {
+    /// Back a store with a specific filename in the shared Application Support
+    /// directory. A second provider (Codex) uses this to keep its history in a
+    /// separate file; the Claude path is unchanged (`init()` delegates here with
+    /// "history.jsonl"). The two instances share a queue LABEL but are distinct
+    /// serial queues, so their file I/O never interleaves.
+    init(filename: String) {
         let fm = FileManager.default
         let base = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                appropriateFor: nil, create: true)
         fileURL = base?
             .appendingPathComponent("eu.smeingast.claude-menubar-usage", isDirectory: true)
-            .appendingPathComponent("history.jsonl")
+            .appendingPathComponent(filename)
     }
+
+    convenience init() { self.init(filename: "history.jsonl") }
 
     /// Append one sample as a compact JSON line. Serialized, fire-and-forget.
     func append(_ s: HistorySample) {
