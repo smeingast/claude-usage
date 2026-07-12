@@ -22,12 +22,13 @@ No servers, no accounts, no config files, no telemetry. It talks to Anthropic
 only, and never to OpenAI at all.
 
 <p align="center">
-  <img src="assets/dropdown.png" width="391"
+  <img src="assets/dropdown.png" width="382"
        alt="The two-provider panel: a Claude instrument with large 5-hour and
             weekly rings, a compact Codex secondary card with its as-of staleness
             readout and a Lead button, a status line, stacked per-provider history
-            graphs with the dotted forecast, and the active Claude and Codex
-            sessions on this Mac">
+            graphs with the dotted forecast, the active Claude and Codex
+            sessions on this Mac, and the Refresh / Settings / About / Quit
+            actions">
 </p>
 <p align="center">
   <sub>The panel: one provider leads with the large rings, the other sits in the
