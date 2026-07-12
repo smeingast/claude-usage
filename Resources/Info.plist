@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Claude Usage</string>
+    <string>Headroom</string>
     <key>CFBundleDisplayName</key>
-    <string>Claude Usage</string>
+    <string>Headroom</string>
     <key>CFBundleExecutable</key>
     <string>ClaudeUsage</string>
     <key>CFBundleIdentifier</key>

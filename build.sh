@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds "Claude Usage.app" (arm64, self-contained), signs it, and optionally notarizes.
+# Builds "Headroom.app" (arm64, self-contained), signs it, and optionally notarizes.
 # Usage:
 #   ./build.sh                       # build into ./build/
 #   ./build.sh --install             # build, then copy to /Applications + clear quarantine
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="Claude Usage"
+APP_NAME="Headroom"
 EXE="ClaudeUsage"
 BUNDLE_ID="eu.smeingast.claude-menubar-usage"
 MIN_MACOS="13.0"
@@ -126,6 +126,10 @@ if $DO_INSTALL; then
     DEST="/Applications/$APP_NAME.app"
     echo "==> Installing to $DEST"
     rm -rf "$DEST"
+    # The pre-rename app shares our bundle id, and two apps with one bundle id
+    # must never coexist (single-instance guard, Launch Services ambiguity);
+    # the rm above only targets the new name.
+    rm -rf "/Applications/Claude Usage.app"
     cp -R "$APP" "$DEST"
     xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
     echo "==> Installed. Launch it from /Applications (or it will start at next login)."

@@ -354,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         // Quit targets NSApp explicitly — terminate(_:) lives on NSApplication, not on
         // us, so the generic addAction (target = self) would silently no-op the click.
-        let quit = NSMenuItem(title: "Quit Claude Usage",
+        let quit = NSMenuItem(title: "Quit Headroom",
                               action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp
         menu.addItem(quit)
