@@ -26,8 +26,9 @@ is reconstructed READ-ONLY from `~/.codex/sessions` rollout logs (never
 
 ## Status
 
-Codex support is complete (packages 1-4b + polish, 741cf46..256e5a0); the
-effort's records (package contract, plan, amendments, review archives) live
-under `design/codex-support/`. Remaining: release prep (in-app rebrand to
-Headroom, README, versioning, notarized release), see
-`handoff-release-prep.md`.
+Codex support is complete; the effort's records (package contract, plan,
+amendments, review archives) live under `design/codex-support/`. Remaining:
+release prep (in-app rebrand to Headroom, README with a new hero screenshot,
+versioning, notarized release). Bundle id stays
+`eu.smeingast.claude-menubar-usage` unless a migration is deliberately built:
+it keys Application Support, defaults, the Keychain ACL, and the login item.

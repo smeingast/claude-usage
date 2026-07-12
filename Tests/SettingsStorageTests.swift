@@ -6,7 +6,7 @@ import XCTest
 // defaults when unset, and a faithful round-trip through UserDefaults.
 final class SettingsStorageTests: XCTestCase {
 
-    private let keys = ["primaryProvider", "barShows", "showCodex"]
+    private let keys = ["primaryProvider", "barShows", "showCodex", "graphs"]
     private var saved: [String: Any?] = [:]
 
     override func setUp() {
@@ -61,8 +61,23 @@ final class SettingsStorageTests: XCTestCase {
         }
     }
 
+    // The Graphs setting (amendment 26): default Both when unset or unknown, and a
+    // faithful round-trip.
+    func testGraphsDefaultAndRoundTrip() {
+        UserDefaults.standard.removeObject(forKey: "graphs")
+        XCTAssertEqual(Settings.graphs, .both)
+        UserDefaults.standard.set("nonsense", forKey: "graphs")
+        XCTAssertEqual(Settings.graphs, .both)
+        for g in GraphsShown.allCases {
+            Settings.graphs = g
+            XCTAssertEqual(Settings.graphs, g)
+            XCTAssertEqual(UserDefaults.standard.string(forKey: "graphs"), g.rawValue)
+        }
+    }
+
     func testBarShowsAndShowCodexTitles() {
         XCTAssertEqual(BarShows.allCases.map(\.title), ["Primary", "Both", "Claude", "Codex"])
         XCTAssertEqual(ShowCodex.allCases.map(\.title), ["Auto", "On", "Off"])
+        XCTAssertEqual(GraphsShown.allCases.map(\.title), ["Both", "Claude", "Codex"])
     }
 }

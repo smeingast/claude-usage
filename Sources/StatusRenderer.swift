@@ -148,6 +148,12 @@ enum Settings {
         get { ShowCodex(rawValue: d.string(forKey: "showCodex") ?? "") ?? .auto }
         set { d.set(newValue.rawValue, forKey: "showCodex") }
     }
+    /// Which stacked graph cards render in two-provider mode (amendment 26).
+    /// Default: Both. Claude-only mode ignores it (always the single Claude graph).
+    static var graphs: GraphsShown {
+        get { GraphsShown(rawValue: d.string(forKey: "graphs") ?? "") ?? .both }
+        set { d.set(newValue.rawValue, forKey: "graphs") }
+    }
 }
 
 /// What the menu-bar readout draws in two-provider mode. Dormant in 4a.
@@ -160,6 +166,21 @@ enum BarShows: String, CaseIterable {
         case .both:    return "Both"
         case .claude:  return "Claude"
         case .codex:   return "Codex"
+        }
+    }
+}
+
+/// Which of the stacked graph cards render in two-provider mode (amendment 26:
+/// the provider pill died; both providers get their own card, primary first).
+/// Follows the BarShows enum pattern.
+enum GraphsShown: String, CaseIterable {
+    case both, claude, codex
+
+    var title: String {
+        switch self {
+        case .both:   return "Both"
+        case .claude: return "Claude"
+        case .codex:  return "Codex"
         }
     }
 }

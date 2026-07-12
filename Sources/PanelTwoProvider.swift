@@ -217,11 +217,13 @@ final class TagRowView: NSView {
     }
 }
 
-// MARK: - Honesty banner
+// MARK: - Honesty banner (model + height math)
 
-/// The instrument's honesty banner: a state-colored dot and a wrapped message. Used
-/// only in two-provider mode; its height is measured from the text so the menu row
-/// fits the copy.
+/// A state-colored dot plus a wrapped message. The primary instrument banner that
+/// used to render this was removed by amendment 24 ("this box should never
+/// appear"), so no BannerView is instantiated anymore; the type stays because the
+/// STRIP's compact sub-banner reuses `BannerModel` as its model and
+/// `BannerView.height` as its height math (StripView draws the sub-banner itself).
 struct BannerModel {
     var dotColor: NSColor
     var text: String
@@ -528,64 +530,6 @@ final class StripView: NSView {
     }
 }
 
-// MARK: - Graph provider pill
-
-/// The Claude/Codex pill that selects which provider's history the graph shows
-/// (two-provider mode only). Clicking mutates a transient selection and repaints the
-/// graph; the menu stays open (custom menu-item views receive the click).
-@MainActor
-final class GraphProviderPillsView: NSView {
-    static let height: CGFloat = 26
-    var selected: UsageProviderKind = .claude
-    var onChange: ((UsageProviderKind) -> Void)?
-    private var rects: [(UsageProviderKind, NSRect)] = []
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        autoresizingMask = [.width]
-        setAccessibilityElement(true)
-        setAccessibilityRole(.group)
-        setAccessibilityLabel("Graph provider")
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) unused") }
-    override var isFlipped: Bool { true }
-
-    override func viewDidChangeEffectiveAppearance() { needsDisplay = true }
-    override func draw(_ dirtyRect: NSRect) {
-        effectiveAppearance.performAsCurrentDrawingAppearance { self.render() }
-    }
-
-    private func render() {
-        rects = []
-        let font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        let h: CGFloat = 20
-        let y = (bounds.height - h) / 2
-        var x = PanelStyle.margin
-        for p in [UsageProviderKind.claude, .codex] {
-            let title = p == .claude ? "Claude" : "Codex"
-            let w = ceil(PanelStyle.size(title, font: font).width) + 18
-            let rect = NSRect(x: x, y: y, width: w, height: h)
-            let active = p == selected
-            // The active pill takes the provider's accent so the graph and pill agree.
-            let fill: NSColor = active ? StatusRenderer.providerAccent(p) : PanelStyle.chip
-            fill.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: h / 2, yRadius: h / 2).fill()
-            let textCol = active ? PanelStyle.textOnAccent(fill) : NSColor.secondaryLabelColor
-            PanelStyle.draw(title, at: NSPoint(x: rect.minX + 9, y: rect.minY + 3),
-                            font: font, color: textCol)
-            rects.append((p, rect))
-            x = rect.maxX + 6
-        }
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
-        for (prov, rect) in rects where rect.insetBy(dx: -3, dy: -5).contains(p) {
-            guard selected != prov else { return }
-            selected = prov
-            needsDisplay = true; displayIfNeeded()
-            onChange?(prov)
-            return
-        }
-    }
-}
+// GraphProviderPillsView was removed by amendment 26: switching the graph between
+// providers felt unnatural in live use, so two-provider mode stacks BOTH providers'
+// graph cards (primary first) instead of toggling one plot.

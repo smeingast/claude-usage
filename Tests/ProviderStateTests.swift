@@ -367,6 +367,51 @@ final class ProviderStateTests: XCTestCase {
                                                       hm: hm(), now: now))
     }
 
+    // MARK: - Compact Claude segment (amendment 25)
+
+    func testClaudeStatusSegmentCompactForms() {
+        let t = utcDate(2026, 1, 2, 13, 40)
+        XCTAssertEqual(ProviderState.claudeStatusSegment(fetchedAt: t, stale: false, hm: hm()),
+                       "Updated 13:40")
+        XCTAssertEqual(ProviderState.claudeStatusSegment(fetchedAt: t, stale: true, hm: hm()),
+                       "Stale \u{00B7} updated 13:40")
+        XCTAssertEqual(ProviderState.claudeStatusSegment(fetchedAt: nil, stale: false, hm: hm()),
+                       "Loading\u{2026}")
+    }
+
+    func testStatusLineTwoProviderStaleStaysCompact() {
+        // The regression amendment 25 fixes: a stale Claude used to inject the full
+        // error string and widen the whole menu. The combined line must carry the
+        // compact stale marker and NO error text.
+        let claudeSeg = ProviderState.claudeStatusSegment(
+            fetchedAt: utcDate(2026, 1, 2, 9, 30), stale: true, hm: hm())
+        let statusNow = utcDate(2026, 1, 2, 10, 16)
+        let codexSeg = ProviderState.codexStatusSegment(observedAt: utcDate(2026, 1, 2, 9, 30),
+                                                        aged: true, hm: hm(), now: statusNow)
+        let full = ProviderState.twoProviderStatusLine(claudeText: claudeSeg, codexSegment: codexSeg)
+        XCTAssertEqual(full, "Stale \u{00B7} updated 09:30 \u{00B7} Codex as of 09:30 \u{00B7} 46m ago")
+        XCTAssertFalse(full.contains("HTTP"))
+        XCTAssertFalse(full.contains("\u{2014}"))     // no "Stale <emdash> <error>" form
+    }
+
+    // MARK: - Graph cards (amendment 26)
+
+    func testGraphCardsTable() {
+        // Claude-only: always the single Claude graph, the setting has no effect.
+        for g in GraphsShown.allCases {
+            XCTAssertEqual(ProviderState.graphCards(g, twoProvider: false, primary: .claude), [.claude])
+            XCTAssertEqual(ProviderState.graphCards(g, twoProvider: false, primary: .codex), [.claude])
+        }
+        // Two-provider: single-provider settings pick that one card.
+        XCTAssertEqual(ProviderState.graphCards(.claude, twoProvider: true, primary: .codex), [.claude])
+        XCTAssertEqual(ProviderState.graphCards(.codex, twoProvider: true, primary: .claude), [.codex])
+        // Both: primary first, secondary below (the Lead hierarchy).
+        XCTAssertEqual(ProviderState.graphCards(.both, twoProvider: true, primary: .claude),
+                       [.claude, .codex])
+        XCTAssertEqual(ProviderState.graphCards(.both, twoProvider: true, primary: .codex),
+                       [.codex, .claude])
+    }
+
     // MARK: - Sessions split header (amendment 11)
 
     func testSessionsHeaderTwoProviderSplit() {

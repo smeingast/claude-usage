@@ -20,9 +20,13 @@ struct GraphData {
     // Two-provider additions (package 4b). `provider` tints the series in Brand mode
     // (coral / teal) and drives the "gaps = idle" legend; `forecastIdle` draws the
     // "forecast pauses (idle)" placeholder when the graphed Codex provider has no
-    // live burn rate. Both default to today's Claude behavior.
+    // live burn rate; `readoutPrefix` names the provider before the readout numbers
+    // (amendment 26: two stacked cards must stay distinguishable in the non-Brand
+    // color modes; nil in Claude-only mode keeps the readout byte-identical to
+    // v0.8). All default to today's Claude behavior.
     var provider: UsageProviderKind = .claude
     var forecastIdle: Bool = false
+    var readoutPrefix: String? = nil
 
     /// Cheap identity so the view can skip redraws when nothing meaningful changed
     /// (menuNeedsUpdate fires on every menu-tracking tick). The `now / 30` bucket lets a
@@ -36,7 +40,7 @@ struct GraphData {
         let p = projected.map { Int($0.rounded()) } ?? -1
         let r = fiveResetsAt.map { Int($0.timeIntervalSince1970) } ?? 0
         let ct = crossTime.map { Int($0.timeIntervalSince1970) / 60 } ?? -1
-        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(provider.rawValue)|\(forecastIdle)|\(Int(now.timeIntervalSince1970) / 30)"
+        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(provider.rawValue)|\(forecastIdle)|\(readoutPrefix ?? "")|\(Int(now.timeIntervalSince1970) / 30)"
     }
 }
 
@@ -405,6 +409,15 @@ final class HistoryGraphView: NSView {
                              leftAligned: Bool = false, plot: CGRect = .zero) {
         let f = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         let s = NSMutableAttributedString()
+        // Provider-name prefix (amendment 26): with two stacked cards, the readout
+        // carries the provider in its accent so the cards stay distinguishable in
+        // monochrome / thresholds / heatmap, where the series ink is neutral. Nil in
+        // Claude-only mode: the readout stays byte-identical to v0.8.
+        if let prefix = m.readoutPrefix {
+            s.append(NSAttributedString(string: prefix + "  ", attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: StatusRenderer.providerAccent(m.provider)]))
+        }
         func add(_ label: String, _ v: Double?) {
             s.append(NSAttributedString(string: label,
                 attributes: [.font: f, .foregroundColor: NSColor.secondaryLabelColor]))

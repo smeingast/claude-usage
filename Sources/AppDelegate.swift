@@ -32,22 +32,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var needsAuth = false       // true only when the token is rejected
     private var forecast: Forecast?     // recomputed on every panel render
 
-    // Two-provider derived state (package 4b). `twoProvider` and `graphProvider` are
-    // resolved AT MENU OPEN (NSMenu can't restructure rows while up); the derived
-    // states and forecasts are recomputed on every render so the copy stays fresh.
-    // In Claude-only mode `twoProvider` is false and every field below is inert, so
+    // Two-provider derived state (package 4b). `twoProvider` is resolved AT MENU
+    // OPEN (NSMenu can't restructure rows while up); the derived states and
+    // forecasts are recomputed on every render so the copy stays fresh. In
+    // Claude-only mode `twoProvider` is false and every field below is inert, so
     // the panel/bar/graph paths are the literal v0.8 behavior (amendment 7).
     private var twoProvider = false
-    private var graphProvider: UsageProviderKind = .claude
     private var claudeDerived: ClaudeDerived?
     private var codexDerived: CodexDerived?
     private var codexForecast: Forecast?
     // True once openResolve has run for the CURRENT tracking session; cleared in
     // menuDidClose. menuNeedsUpdate re-enters on every menu-tracking tick (the
     // HistoryGraphView signature comment documents this), and openResolve must not
-    // re-run then: it would reset graphProvider (stomping a mid-open graph-pill
-    // selection) and re-resize the banner/strip rows, whose structure and heights
-    // are per-open (amendment 1).
+    // re-run then: it would re-resize the strip row, whose structure and height are
+    // per-open (amendment 1).
     private var openResolved = false
     private static let codexRootPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".codex", isDirectory: true).path
@@ -63,25 +61,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let sonnetItem = NSMenuItem()
 
     // Two-provider panel chrome (package 4b): a provider tag row ABOVE the instrument,
-    // an honesty banner BELOW it, the compact secondary strip, and the graph provider
-    // pill. All hidden in Claude-only mode (kept out of layout), so the panel is the
-    // literal v0.8 instrument then.
+    // the compact secondary strip, and the graph provider pill. All hidden in
+    // Claude-only mode (kept out of layout), so the panel is the literal v0.8
+    // instrument then. There is NO honesty banner under the instrument (amendment 24:
+    // "this box should never appear"): the signals live in the tag-row age line, the
+    // rings, the warning-light pip, the status line, and the secondary strip's
+    // compact sub-line.
     private let tagRowItem = NSMenuItem()
     private let tagRowView = TagRowView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
                                                       height: TagRowView.height))
-    private let bannerItem = NSMenuItem()
-    private let bannerView = BannerView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width, height: 40))
     private let stripItem = NSMenuItem()
     private let stripView = StripView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
                                                     height: StripView.mainRowHeight + 11))
-    private let graphProviderItem = NSMenuItem()
-    private let graphProviderView = GraphProviderPillsView(frame: NSRect(x: 0, y: 0, width: PanelStyle.width,
-                                                                         height: GraphProviderPillsView.height))
+    // Second graph card (amendment 26: both providers get stacked graphs, the
+    // provider pill is gone). The first card is the existing `graphView`; this one
+    // sits directly below it and is hidden unless two-provider mode shows two cards.
+    // Which provider each card renders is CONTENT, resolved on every applyGraphData
+    // (primary first, secondary below), so a mid-open Lead swap re-renders both in
+    // place; only the card COUNT is structural and per-open.
+    private let secondGraphItem = NSMenuItem()
+    private let secondGraphView = HistoryGraphView(frame: NSRect(x: 0, y: 0, width: 360, height: 116))
     // The two-provider settings roots, kept as properties so openResolve can show/
     // hide them from the live install stat (hidden on a clean machine; visible even
     // under Show Codex = Off, which must stay reversible from the UI).
     private let barShowsRootItem = NSMenuItem()
     private let showCodexRootItem = NSMenuItem()
+    private let graphsRootItem = NSMenuItem()
     private let statusLine = NSMenuItem()
     private let loginToggle = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
     private let dockToggle = NSMenuItem(title: "Show Dock Icon", action: nil, keyEquivalent: "")
@@ -241,8 +246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
 
         // The instrument panel. In two-provider mode a provider tag row sits ABOVE
-        // the header and an honesty banner BELOW it; both are hidden (out of layout)
-        // in Claude-only mode, so the header is rings + numbers exactly as v0.8.
+        // the header; it is hidden (out of layout) in Claude-only mode, so the
+        // header is rings + numbers exactly as v0.8. No honesty banner exists below
+        // the instrument (amendment 24): the state signals live in the tag-row age
+        // line, the rings, the pip, the status line, and the strip's sub-line.
         tagRowItem.isEnabled = false
         tagRowItem.view = tagRowView
         tagRowItem.isHidden = true
@@ -251,11 +258,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headerItem.isEnabled = false
         headerItem.view = headerView
         menu.addItem(headerItem)
-
-        bannerItem.isEnabled = false
-        bannerItem.view = bannerView
-        bannerItem.isHidden = true
-        menu.addItem(bannerItem)
 
         // Model-specific weekly rows (shown only when Claude is primary and in use).
         for item in [opusItem, sonnetItem] {
@@ -272,18 +274,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         stripView.onLead = { [weak self] in self?.leadSwap() }
         menu.addItem(stripItem)
 
-        // Graph card: a provider pill row (two-provider only), then range/mode pills
-        // directly above the (interactive) graph. All enabled — a disabled item can
-        // gate event delivery to its view, and these views handle their own clicks.
-        graphProviderItem.isEnabled = true
-        graphProviderItem.view = graphProviderView
-        graphProviderItem.isHidden = true
-        graphProviderView.onChange = { [weak self] p in
-            self?.graphProvider = p
-            self?.applyGraphData()
-        }
-        menu.addItem(graphProviderItem)
-
+        // Graph cards: one shared range/mode pills row above up to two stacked
+        // graphs (amendment 26: no provider pill; two-provider mode shows both
+        // providers' histories, primary first). All enabled, since a disabled item
+        // can gate event delivery to its view, and these views handle their own
+        // clicks/hover. The second card is hidden outside two-provider mode.
         pillsItem.isEnabled = true
         pillsItem.view = pillsView
         menu.addItem(pillsItem)
@@ -291,6 +286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         graphItem.isEnabled = true
         graphItem.view = graphView
         menu.addItem(graphItem)
+        secondGraphItem.isEnabled = true
+        secondGraphItem.view = secondGraphView
+        secondGraphItem.isHidden = true
+        menu.addItem(secondGraphItem)
         menu.addItem(graphSeparator)
 
         // Active-sessions section: header + fixed row slots + trailing separator.
@@ -323,16 +322,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         colorRoot.submenu = buildColorMenu()
         menu.addItem(colorRoot)
 
-        // Two-provider controls (package 4b). Bar Shows and Show Codex follow the
-        // same enum-driven submenu pattern as Display Style / Color. Primary provider
-        // is chosen with the strip's Lead button rather than a menu item. Both items
-        // are hidden until openResolve confirms Codex is installed (a clean machine
-        // sees the literal v0.8 settings menu); they stay visible under Show Codex =
-        // Off so Off remains reversible from the UI.
+        // Two-provider controls (package 4b). Bar Shows, Graphs, and Show Codex
+        // follow the same enum-driven submenu pattern as Display Style / Color.
+        // Primary provider is chosen with the strip's Lead button rather than a menu
+        // item. All three items are hidden until openResolve confirms Codex is
+        // installed (a clean machine sees the literal v0.8 settings menu); they stay
+        // visible under Show Codex = Off so Off remains reversible from the UI.
         barShowsRootItem.title = "Bar Shows"
         barShowsRootItem.submenu = buildBarShowsMenu()
         barShowsRootItem.isHidden = true
         menu.addItem(barShowsRootItem)
+
+        graphsRootItem.title = "Graphs"
+        graphsRootItem.submenu = buildGraphsMenu()
+        graphsRootItem.isHidden = true
+        menu.addItem(graphsRootItem)
 
         showCodexRootItem.title = "Show Codex"
         showCodexRootItem.submenu = buildShowCodexMenu()
@@ -403,28 +407,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Resolve the two-provider layout ONCE per menu open (amendment 1: NSMenu can't
-    /// restructure rows while up). This decides `twoProvider`, sets the tag / banner /
-    /// strip / graph-pill row visibility, resets the graph to the primary provider,
-    /// freezes the banner and strip HEIGHTS for this open, and resolves whether the
-    /// two-provider settings items appear. `renderMenu` then only mutates row CONTENT
-    /// (safe while open); a mid-open Lead swap changes content but the frozen heights
-    /// stand until the next open.
+    /// restructure rows while up). This decides `twoProvider`, sets the tag / strip /
+    /// second-graph row visibility, freezes the strip HEIGHT for this open, and
+    /// resolves whether the two-provider settings items appear. `renderMenu` then
+    /// only mutates row CONTENT (safe while open); a mid-open Lead swap changes
+    /// content but the frozen height stands until the next open. No honesty banner
+    /// row exists (amendment 24).
     private func openResolve() {
         openResolved = true
         computeDerived(now: Date())
         twoProvider = codexUISurfacesVisible()
-        graphProvider = Settings.primaryProvider
-        graphProviderView.selected = graphProvider
 
-        // The banner row exists only for states that carry a warning or an honesty
-        // caveat (amendment 19): a calm normal primary derives an EMPTY message, and
-        // an empty message means no banner row at all. Resolved per open like the
-        // strip sub-banner; a mid-open state change waits for the next open.
-        let primaryMsg = (Settings.primaryProvider == .claude ? claudeDerived?.msg : codexDerived?.msg) ?? ""
         tagRowItem.isHidden = !twoProvider
-        bannerItem.isHidden = !twoProvider || primaryMsg.isEmpty
         stripItem.isHidden = !twoProvider
-        graphProviderItem.isHidden = !twoProvider
+        // The second graph card is structural too: visible only when the Graphs
+        // setting resolves to two cards (amendment 26). WHICH provider each card
+        // shows is content, re-resolved on every applyGraphData, so a mid-open Lead
+        // swap re-renders both cards in place without touching row structure.
+        secondGraphItem.isHidden = ProviderState.graphCards(
+            Settings.graphs, twoProvider: twoProvider,
+            primary: Settings.primaryProvider).count < 2
 
         // The two-provider settings controls exist only when Codex is installed (a
         // clean machine sees the literal v0.8 settings menu). Deliberately keyed on
@@ -432,15 +434,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // visible, otherwise Off would be a trap with no UI path back.
         let installed = FileManager.default.fileExists(atPath: Self.codexRootPath)
         barShowsRootItem.isHidden = !installed
+        graphsRootItem.isHidden = !installed
         showCodexRootItem.isHidden = !installed
 
         guard twoProvider else { return }
-        // Freeze this open's heights from the primary banner text (when a banner was
-        // allocated at all) and the secondary strip model (its sub-banner, when
-        // present, drives the strip height).
-        if !primaryMsg.isEmpty {
-            resize(bannerView, height: BannerView.height(for: primaryMsg, viewWidth: PanelStyle.width))
-        }
+        // Freeze this open's strip height from the secondary strip model (its
+        // sub-banner, when present, drives the height).
         resize(stripView, height: StripView.height(for: secondaryStripModel(), viewWidth: PanelStyle.width))
     }
 
@@ -851,7 +850,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             weekResetAbs: snapshot?.secondary?.resetsAt.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
             weekResetRel: snapshot?.secondary?.resetsAt.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
             signedOut: needsAuth, provider: .claude))
-        bannerView.configure(BannerModel(dotColor: bannerDot(cd?.pip, .claude), text: cd?.msg ?? ""))
     }
 
     private func configureCodexPrimary(now: Date) {
@@ -874,12 +872,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             provider: .codex,
             inferredFive: cd?.inferredFive ?? false,
             inferredWeek: cd?.inferredWeek ?? false))
-        bannerView.configure(BannerModel(dotColor: bannerDot(cd?.pip, .codex), text: cd?.msg ?? ""))
     }
 
-    /// The banner/sub-banner bullet color: the pip severity's color, falling back to
-    /// the provider accent for a calm state (pipColor returns the accent there) and to
-    /// a neutral gray if the severity is hidden.
+    /// The strip sub-banner's bullet color: the pip severity's color, falling back
+    /// to the provider accent for a calm state (pipColor returns the accent there)
+    /// and to a neutral gray if the severity is hidden. Only the strip uses this
+    /// now; the primary honesty banner is gone (amendment 24).
     private func bannerDot(_ pip: PipSeverity?, _ provider: UsageProviderKind) -> NSColor {
         guard let pip else { return StatusRenderer.providerAccent(provider) }
         return StatusRenderer.pipColor(pip) ?? .tertiaryLabelColor
@@ -965,22 +963,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// The status line. Claude-only keeps today's plain string (amendment 12); two-
     /// provider becomes an attributed title "Updated HH:MM · Codex as of HH:MM · Nh
-    /// ago" with the Codex age segment amber when aged.
+    /// ago" with the Codex age segment amber when aged. In two-provider mode the
+    /// Claude segment is COMPACT (amendment 25): NSMenu sizes itself to its widest
+    /// text item, and the raw error string of the old "Stale" form forced the whole
+    /// menu wider than the 360 pt panel. The error text moves to the status item's
+    /// tooltip.
     private func renderStatusLine(now: Date) {
-        let claudeText = Self.statusLineText(fetchedAt: snapshot?.fetchedAt,
-                                             lastError: lastError, formatter: Self.updatedFormatter)
-        guard twoProvider, let cd = codexDerived, cd.hasData else {
+        guard twoProvider else {
+            // Claude-only: today's exact full string (golden-tested), plain title.
             statusLine.attributedTitle = nil        // revert to the plain title path
-            statusLine.title = claudeText
+            statusLine.title = Self.statusLineText(fetchedAt: snapshot?.fetchedAt,
+                                                   lastError: lastError, formatter: Self.updatedFormatter)
+            // No tooltip in Claude-only mode (never set pre-4b; assigning nil also
+            // clears a leftover from a two-provider open after Codex is hidden).
+            statusLine.toolTip = nil
             return
         }
-        let seg = ProviderState.codexStatusSegment(observedAt: cd.observedAt, aged: cd.aged,
-                                                   hm: Self.updatedFormatter, now: now)
-        let full = ProviderState.twoProviderStatusLine(claudeText: claudeText, codexSegment: seg)
+        // EVERY two-provider state takes the compact form, including Codex noData
+        // (the codex segment is just absent then): the wide error string must never
+        // reach a text item while the strip keeps the panel at 360 pt.
+        let claudeSeg = ProviderState.claudeStatusSegment(
+            fetchedAt: snapshot?.fetchedAt,
+            stale: lastError != nil && snapshot != nil,
+            hm: Self.updatedFormatter)
+        statusLine.toolTip = lastError              // the full error lives here now
+        let cd = codexDerived
+        let seg = (cd?.hasData ?? false)
+            ? ProviderState.codexStatusSegment(observedAt: cd?.observedAt, aged: cd?.aged ?? false,
+                                               hm: Self.updatedFormatter, now: now)
+            : nil
+        let full = ProviderState.twoProviderStatusLine(claudeText: claudeSeg, codexSegment: seg)
         let attr = NSMutableAttributedString(string: full, attributes: [
             .font: NSFont.menuFont(ofSize: 0), .foregroundColor: NSColor.secondaryLabelColor])
         // Color just the trailing age ("Nh ago") amber when the reading is aged.
-        if cd.aged, let obs = cd.observedAt {
+        if let cd, cd.aged, let obs = cd.observedAt {
             let ageStr = ProviderState.relAge(now.timeIntervalSince(obs))
             if let r = full.range(of: ageStr, options: .backwards) {
                 attr.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: NSRange(r, in: full))
@@ -990,13 +1006,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// The strip's Lead button: promote the secondary provider to primary, in place.
-    /// Content swaps immediately (rings, numbers, banner, strip, graph, bar); the row
+    /// Content swaps immediately (rings, numbers, strip, graph cards, bar); the row
     /// HEIGHTS stay frozen at this open's values (amendment 1) because only
-    /// `openResolve` resizes them, and it runs on the next open.
+    /// `openResolve` resizes them, and it runs on the next open. The stacked graph
+    /// cards reorder as content (primary first) inside applyGraphData, which
+    /// renderMenu calls.
     private func leadSwap() {
         Settings.primaryProvider = Settings.primaryProvider == .claude ? .codex : .claude
-        graphProvider = Settings.primaryProvider
-        graphProviderView.selected = graphProvider
         renderMenu()
         renderSessions()
         renderBar()
@@ -1147,7 +1163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // them dirty so the next menu open repaints in the new mode.
         renderMenu()
         pillsView.needsDisplay = true
-        for v in [tagRowView, bannerView, stripView, graphProviderView] as [NSView] { v.needsDisplay = true }
+        for v in [tagRowView, stripView] as [NSView] { v.needsDisplay = true }
         for it in sessionRowItems { it.view?.needsDisplay = true }
     }
 
@@ -1191,6 +1207,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         renderBar()
     }
 
+    private func buildGraphsMenu() -> NSMenu {
+        let m = NSMenu()
+        for g in GraphsShown.allCases {
+            let it = NSMenuItem(title: g.title, action: #selector(selectGraphs(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = g.rawValue
+            it.state = (g == Settings.graphs) ? .on : .off
+            m.addItem(it)
+        }
+        return m
+    }
+
+    @objc private func selectGraphs(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let g = GraphsShown(rawValue: raw) else { return }
+        Settings.graphs = g
+        sender.menu?.items.forEach { $0.state = (($0.representedObject as? String) == raw) ? .on : .off }
+        // Card count is structural and resolves on the next open (the click closed
+        // the menu anyway); nothing needs an immediate re-render.
+    }
+
     // MARK: - Usage history
 
     /// Record a sample from a successful fetch: throttle to the ~5-min grid (Refresh
@@ -1213,18 +1249,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// Build the windowed GraphData from the selected provider's buffer and hand it to
-    /// the view. In two-provider mode the provider pill picks Claude or Codex history;
-    /// Claude-only always graphs Claude, byte-for-byte as v0.8 (the Codex branch is
-    /// unreachable and every added field takes its default). Cheap (a slice); the view
-    /// skips the redraw when nothing meaningful changed.
+    /// Feed the stacked graph cards (amendment 26). The visible card LIST (order:
+    /// primary first) comes from the pure `ProviderState.graphCards`; the first card
+    /// always exists, the second only in two-provider mode with Graphs = Both (its
+    /// row visibility was resolved at open). Which provider each card renders is
+    /// re-resolved here on every call, so a mid-open Lead swap reorders the cards as
+    /// a pure content swap. Claude-only stays byte-for-byte v0.8: one card, Claude
+    /// data, no readout prefix. Cheap (a slice per card); the views skip the redraw
+    /// when nothing meaningful changed.
     private func applyGraphData() {
         let now = Date()
         let cutoff = now.addingTimeInterval(-Settings.historyRange.duration)
-        if twoProvider && graphProvider == .codex {
+        let cards = ProviderState.graphCards(Settings.graphs, twoProvider: twoProvider,
+                                             primary: Settings.primaryProvider)
+        graphView.update(graphData(for: cards[0], now: now, cutoff: cutoff))
+        if cards.count > 1 {
+            secondGraphView.update(graphData(for: cards[1], now: now, cutoff: cutoff))
+        }
+    }
+
+    /// The GraphData for one provider's card. The Claude branch is the pre-4b build
+    /// verbatim (plus the two-provider-only readout prefix, nil in Claude-only mode);
+    /// the Codex branch mirrors it from the derived state, with the forecast gate and
+    /// the idle placeholder. The prefix names the provider in its accent so the two
+    /// stacked cards stay distinguishable in the non-Brand color modes.
+    private func graphData(for provider: UsageProviderKind, now: Date, cutoff: Date) -> GraphData {
+        let prefix: String? = twoProvider ? (provider == .claude ? "Claude" : "Codex") : nil
+        if provider == .codex {
             let cd = codexDerived
             let active = cd?.forecastActive ?? false
-            graphView.update(GraphData(
+            return GraphData(
                 samples: codexHistory.filter { $0.t >= cutoff },
                 mode: Settings.graphMode, range: Settings.historyRange,
                 colorMode: Settings.colorMode, now: now,
@@ -1233,10 +1287,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 projected: active ? cd?.projFive : nil,
                 crosses: active && (codexForecast?.crosses ?? false),
                 crossTime: active ? cd?.crossTime : nil,
-                provider: .codex, forecastIdle: !active))
-            return
+                provider: .codex, forecastIdle: !active,
+                readoutPrefix: prefix)
         }
-        graphView.update(GraphData(
+        return GraphData(
             samples: history.filter { $0.t >= cutoff },
             mode: Settings.graphMode,
             range: Settings.historyRange,
@@ -1247,7 +1301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             fiveResetsAt: snapshot?.primary?.resetsAt,
             projected: forecast?.projected,
             crosses: forecast?.crosses ?? false,
-            crossTime: forecast?.crossTime))
+            crossTime: forecast?.crossTime,
+            readoutPrefix: prefix)
     }
 
     /// Merge two sample lists, de-duplicating by whole-second timestamp (`b` wins), sorted.

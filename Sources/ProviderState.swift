@@ -126,6 +126,25 @@ enum ProviderState {
         }
     }
 
+    // MARK: - Graph cards (amendment 26)
+
+    /// The ordered provider list for the stacked graph cards. Claude-only mode is
+    /// always the single Claude graph (the setting has no effect there, keeping the
+    /// v0.8 path untouched); in two-provider mode the Graphs setting picks the cards,
+    /// and Both orders them primary first to match the instrument/strip hierarchy.
+    /// Pure so the visibility table is testable; AppDelegate uses the COUNT for the
+    /// per-open row structure and the ORDER for per-render card content (a mid-open
+    /// Lead swap reorders content without touching rows).
+    nonisolated static func graphCards(_ setting: GraphsShown, twoProvider: Bool,
+                                       primary: UsageProviderKind) -> [UsageProviderKind] {
+        guard twoProvider else { return [.claude] }
+        switch setting {
+        case .claude: return [.claude]
+        case .codex:  return [.codex]
+        case .both:   return primary == .claude ? [.claude, .codex] : [.codex, .claude]
+        }
+    }
+
     // MARK: - Bar pip filter (amendment 23)
 
     /// The severity the BAR may draw as its corner pip / percentages bullet, or nil
@@ -384,13 +403,29 @@ enum ProviderState {
         return claudeCount == 1 ? "1 active session" : "\(claudeCount) active sessions"
     }
 
-    // MARK: - Status line (amendment 12)
+    // MARK: - Status line (amendments 12 and 25)
+
+    /// The Claude segment of the TWO-PROVIDER status line, compact by design
+    /// (amendment 25): NSMenu sizes itself to its widest text item, and the full
+    /// error string ("Stale \u{2014} Server returned HTTP 429. \u{00B7} ...") forced
+    /// the whole menu wider than the 360 pt panel. "Updated HH:MM" normally,
+    /// "Stale \u{00B7} updated HH:MM" when a later poll failed but the snapshot
+    /// stands, "Loading\u{2026}" before the first snapshot; the raw error string
+    /// belongs in the status item's TOOLTIP, never in the line. Claude-only mode
+    /// keeps the full `statusLineText` format untouched.
+    nonisolated static func claudeStatusSegment(fetchedAt: Date?, stale: Bool,
+                                                hm: DateFormatter) -> String {
+        guard let fetchedAt else { return "Loading\u{2026}" }
+        return stale
+            ? "Stale \u{00B7} updated " + hm.string(from: fetchedAt)
+            : "Updated " + hm.string(from: fetchedAt)
+    }
 
     /// The Codex segment of the two-provider status line: "Codex as of HH:MM" plus
     /// the age ("\u{00B7} Nh ago") when aged. Returns nil when Codex has no reading
-    /// to stamp (not installed / no data). The Claude segment is the app's existing
-    /// `statusLineText`; the caller joins them with " \u{00B7} " and colors the
-    /// codex age segment amber when `aged`.
+    /// to stamp (not installed / no data). The Claude segment is `claudeStatusSegment`
+    /// above; the caller joins them with " \u{00B7} " and colors the codex age
+    /// segment amber when `aged`.
     nonisolated static func codexStatusSegment(observedAt: Date?, aged: Bool,
                                                hm: DateFormatter, now: Date) -> String? {
         guard let obs = observedAt else { return nil }
@@ -401,8 +436,8 @@ enum ProviderState {
 
     /// The full two-provider status line as a plain string (the attributed builder
     /// in AppDelegate colors the trailing age segment amber). `claudeText` is the
-    /// app's existing status text ("Updated HH:MM" / "Stale -- ..."); the codex
-    /// segment is appended after " \u{00B7} " when present.
+    /// compact `claudeStatusSegment` (amendment 25); the codex segment is appended
+    /// after " \u{00B7} " when present.
     nonisolated static func twoProviderStatusLine(claudeText: String,
                                                   codexSegment: String?) -> String {
         guard let seg = codexSegment else { return claudeText }
