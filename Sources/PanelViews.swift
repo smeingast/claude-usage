@@ -16,7 +16,7 @@ enum PanelStyle {
     /// mirrors the glyph.
     static func accent(for mode: ColorMode) -> NSColor {
         switch mode {
-        case .claude:                             return StatusRenderer.claudeCoral
+        case .brand:                              return StatusRenderer.claudeCoral
         case .accent:                             return .controlAccentColor
         case .monochrome, .thresholds, .heatmap:  return .labelColor
         }
@@ -27,7 +27,7 @@ enum PanelStyle {
     /// True when the accent is a hue (coral / system accent) rather than
     /// neutral ink — gates the graph's area fill, which reads as smudge in gray.
     static func accentIsChromatic(_ mode: ColorMode) -> Bool {
-        mode == .claude || mode == .accent
+        mode == .brand || mode == .accent
     }
 
     static var track: NSColor { .quaternaryLabelColor }

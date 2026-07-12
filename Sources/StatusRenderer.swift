@@ -22,18 +22,46 @@ enum DisplayStyle: String, CaseIterable {
 }
 
 /// How color is applied to the readout.
+///
+/// `brand` was named `claude` through v0.8 (rawValue "claude", title "Claude").
+/// When Codex became a second provider the case was renamed to `brand` (rawValue
+/// "brand", title "Brand"): this is the one mode where hue means "provider" (coral
+/// = Claude, teal = Codex), so a provider-neutral name fits. The stored value is
+/// migrated by the `Settings.colorMode` getter, which maps a stored "claude" (and
+/// a missing value) to `.brand`. Downgrade note: an old app version that reads a
+/// stored "brand" falls back to `.claude` via its own `?? .claude` default, which
+/// is visually identical, so the migration is safe both directions.
 enum ColorMode: String, CaseIterable {
-    case claude, thresholds, monochrome, heatmap, accent
+    case brand, thresholds, monochrome, heatmap, accent
 
     var title: String {
         switch self {
-        case .claude:     return "Claude"
+        case .brand:      return "Brand"
         case .thresholds: return "Thresholds (orange / red)"
         case .monochrome: return "Monochrome"
         case .heatmap:    return "Heatmap (green → red)"
         case .accent:     return "System accent"
         }
     }
+}
+
+/// Which provider a rendered element represents in the two-provider hierarchy:
+/// the user-chosen `primary` (full instrument / bar glyph) or the `secondary`
+/// (compact strip / corner pip). Only the System-accent color mode dims the
+/// secondary role by alpha (amendment 14); every other mode ignores it. The
+/// default at every renderer entry point is `.primary`, so all pre-4a call sites
+/// are unaffected. Dormant in 4a: no call site passes `.secondary` yet.
+enum ProviderRole { case primary, secondary }
+
+/// The menu-bar corner pip's state for the OTHER (secondary) provider, mapped to
+/// a color by amendment 5. Dormant in 4a: no call site draws a pip yet.
+enum PipSeverity {
+    case red                        // a real >= 90 on that provider's own 5-hour window
+    case amber                      // watch / pace, or an attention state:
+                                    // Claude signed out, Claude stale, Codex inferred-zero
+    case calm(UsageProviderKind)    // fresh and calm: the provider's own accent (coral / teal)
+    case muted                      // Codex noData or aged-idle
+    case hidden                     // provider not installed / hidden: no pip at all
 }
 
 /// Time span shown by the usage-history graph. Sub-hour spans are omitted: the 300 s
@@ -82,7 +110,11 @@ enum Settings {
         set { d.set(newValue.rawValue, forKey: "displayStyle") }
     }
     static var colorMode: ColorMode {
-        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .claude }
+        // Migration [B10]: a stored "claude" (the pre-4a rawValue) and a missing
+        // value both resolve to `.brand`. `ColorMode(rawValue: "claude")` is now
+        // nil, so the `?? .brand` default catches both cases; the setter writes
+        // "brand".
+        get { ColorMode(rawValue: d.string(forKey: "colorMode") ?? "") ?? .brand }
         set { d.set(newValue.rawValue, forKey: "colorMode") }
     }
     static var historyRange: HistoryRange {
@@ -92,6 +124,56 @@ enum Settings {
     static var graphMode: GraphMode {
         get { GraphMode(rawValue: d.string(forKey: "graphMode") ?? "") ?? .utilization }
         set { d.set(newValue.rawValue, forKey: "graphMode") }
+    }
+
+    // Two-provider groundwork (package 4a). Written and read only from tests for
+    // now; no production code path reads these until package 4b wires the
+    // two-provider UI. Defaults reproduce today's single-provider behavior.
+
+    /// Which provider gets the full instrument / the bar glyph. Default: Claude.
+    static var primaryProvider: UsageProviderKind {
+        get { UsageProviderKind(rawValue: d.string(forKey: "primaryProvider") ?? "") ?? .claude }
+        set { d.set(newValue.rawValue, forKey: "primaryProvider") }
+    }
+    /// What the menu-bar readout shows. Default: the primary provider's glyph
+    /// (plus the dormant corner pip for the other provider).
+    static var barShows: BarShows {
+        get { BarShows(rawValue: d.string(forKey: "barShows") ?? "") ?? .primary }
+        set { d.set(newValue.rawValue, forKey: "barShows") }
+    }
+    /// Whether the Codex surfaces appear. Default: Auto (show only when Codex is
+    /// installed); On forces them, Off hides them entirely.
+    static var showCodex: ShowCodex {
+        get { ShowCodex(rawValue: d.string(forKey: "showCodex") ?? "") ?? .auto }
+        set { d.set(newValue.rawValue, forKey: "showCodex") }
+    }
+}
+
+/// What the menu-bar readout draws in two-provider mode. Dormant in 4a.
+enum BarShows: String, CaseIterable {
+    case primary, both, claude, codex
+
+    var title: String {
+        switch self {
+        case .primary: return "Primary"
+        case .both:    return "Both"
+        case .claude:  return "Claude"
+        case .codex:   return "Codex"
+        }
+    }
+}
+
+/// Codex visibility policy. Dormant in 4a. `auto` shows Codex only when the
+/// `~/.codex` directory exists (resolved in 4b); `on`/`off` force the choice.
+enum ShowCodex: String, CaseIterable {
+    case auto, on, off
+
+    var title: String {
+        switch self {
+        case .auto: return "Auto"
+        case .on:   return "On"
+        case .off:  return "Off"
+        }
     }
 }
 
@@ -110,12 +192,76 @@ enum StatusRenderer {
             : NSColor(srgbRed: 0.745, green: 0.357, blue: 0.216, alpha: 1)   // deeper clay
     }
 
+    /// Codex's accent: a brand-neutral teal (avoids OpenAI trade dress), tuned
+    /// per menu-bar appearance exactly like `claudeCoral`. Light #2C7A8A, dark
+    /// #66B4C4. Dormant in 4a; consumed in 4b for the Codex glyph / rings.
+    static let codexTeal = NSColor(name: "CodexTeal") { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.400, green: 0.706, blue: 0.769, alpha: 1)   // #66B4C4
+            : NSColor(srgbRed: 0.173, green: 0.478, blue: 0.541, alpha: 1)   // #2C7A8A
+    }
+
+    /// Codex's weekly companion tint, the teal analog of coral's alpha-dimmed
+    /// weekly ring (amendment 4: Brand mode uses the provider's weekly companion).
+    /// Light #5E8B93, dark #79A6AE. Dormant in 4a.
+    static let codexTealWeekly = NSColor(name: "CodexTealWeekly") { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 0.475, green: 0.651, blue: 0.682, alpha: 1)   // #79A6AE
+            : NSColor(srgbRed: 0.369, green: 0.545, blue: 0.576, alpha: 1)   // #5E8B93
+    }
+
+    /// The provider's Brand-mode accent (the color hue means "provider" in Brand
+    /// mode only). Claude keeps coral; Codex is teal.
+    static func providerAccent(_ provider: UsageProviderKind) -> NSColor {
+        switch provider {
+        case .claude: return claudeCoral
+        case .codex:  return codexTeal
+        }
+    }
+
+    /// The provider's Brand-mode weekly companion tint (amendment 4). Claude has
+    /// no distinct named color (its weekly ring is coral dimmed to 0.5 alpha at
+    /// the call site, unchanged from v0.8); Codex uses `codexTealWeekly`. Dormant
+    /// in 4a. Returned undimmed; callers apply the weekly alpha as today.
+    static func providerWeeklyAccent(_ provider: UsageProviderKind) -> NSColor {
+        switch provider {
+        case .claude: return claudeCoral
+        case .codex:  return codexTealWeekly
+        }
+    }
+
+    /// Alpha applied to the System-accent color for a secondary-role element
+    /// (amendment 14: dim by role, not provider). Dormant in 4a (no call site
+    /// passes `role: .secondary`); 4b may tune it. 0.55 keeps the dimmed accent
+    /// clearly subordinate while still legible on both bar appearances.
+    static let secondaryRoleDim: CGFloat = 0.55
+
     /// Color for a single utilization value under the chosen mode.
-    static func color(_ v: Double, _ mode: ColorMode) -> NSColor {
+    ///
+    /// `provider` and `role` are dormant additions for the two-provider work: with
+    /// their defaults (`.claude` / `.primary`) this reproduces the pre-4a
+    /// `color(_:_:)` output byte-for-byte, which the 320-cell parity test proves.
+    /// - `provider` selects the Brand-mode hue (coral vs teal); the thresholds,
+    ///   monochrome, and heatmap modes ignore it, so hue keeps meaning severity /
+    ///   ink / intensity there regardless of provider (amendments 3-4).
+    /// - `role` dims only the System-accent secondary role (amendment 14).
+    static func color(_ v: Double, _ mode: ColorMode,
+                      provider: UsageProviderKind = .claude,
+                      role: ProviderRole = .primary) -> NSColor {
         switch mode {
-        case .claude:     return v >= 90 ? .systemRed : claudeCoral
+        case .brand:
+            // Red's >= 90 override wins in every mode, per provider (the one hard
+            // color rule from v0.5). Below the cap, Brand hue encodes the provider.
+            return v >= 90 ? .systemRed : providerAccent(provider)
         case .monochrome: return .labelColor
-        case .accent:     return .controlAccentColor
+        case .accent:
+            // Amendment 14: dim the SECONDARY provider role via alpha, never the
+            // provider identity. Primary (the default) keeps the full OS accent.
+            return role == .secondary
+                ? NSColor.controlAccentColor.withAlphaComponent(secondaryRoleDim)
+                : .controlAccentColor
         case .thresholds:
             if v >= 90 { return .systemRed }
             if v >= 70 { return .systemOrange }
@@ -124,6 +270,18 @@ enum StatusRenderer {
             let t = min(max(v / 100, 0), 1)
             let hue = (1 - t) * 0.34            // 0.34 ≈ green at 0%, 0.0 = red at 100%
             return NSColor(hue: hue, saturation: 0.85, brightness: 0.9, alpha: 1)
+        }
+    }
+
+    /// Amendment 5's complete pip color mapping for the menu-bar corner pip.
+    /// Returns `nil` for `.hidden` (draw no pip). Dormant in 4a.
+    static func pipColor(_ severity: PipSeverity) -> NSColor? {
+        switch severity {
+        case .red:         return .systemRed
+        case .amber:       return .systemOrange
+        case .calm(let p): return providerAccent(p)
+        case .muted:       return .tertiaryLabelColor
+        case .hidden:      return nil
         }
     }
 
@@ -145,7 +303,8 @@ enum StatusRenderer {
         }
     }
 
-    static func percentText(_ five: Double?, _ week: Double?, _ mode: ColorMode, _ font: NSFont) -> NSAttributedString {
+    static func percentText(_ five: Double?, _ week: Double?, _ mode: ColorMode, _ font: NSFont,
+                            pip: PipSeverity? = nil) -> NSAttributedString {
         func chunk(_ v: Double?) -> NSAttributedString {
             let str = v == nil ? "—" : "\(Int(v!.rounded()))%"
             let col = v == nil ? NSColor.labelColor : color(v!, mode)
@@ -155,6 +314,13 @@ enum StatusRenderer {
         s.append(chunk(five))
         s.append(NSAttributedString(string: " / ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
         s.append(chunk(week))
+        // Dormant trailing pip (amendment 6): the text style carries the second
+        // provider's state as a colored "·" bullet. `pip == nil` (every pre-4a
+        // call site) appends nothing, so the string is byte-identical to before.
+        // Droppable in 4b if illegible at the bar font.
+        if let pip, let pc = pipColor(pip) {
+            s.append(NSAttributedString(string: " ·", attributes: [.font: font, .foregroundColor: pc]))
+        }
         return s
     }
 
@@ -178,9 +344,26 @@ enum StatusRenderer {
     // MARK: - Image rendering
 
     static func image(five: Double?, week: Double?, style: DisplayStyle, mode: ColorMode,
-                      height: CGFloat = barHeight, projected: Double? = nil) -> NSImage {
+                      height: CGFloat = barHeight, projected: Double? = nil,
+                      provider: UsageProviderKind = .claude, role: ProviderRole = .primary,
+                      pip: PipSeverity? = nil,
+                      inferredFive: Bool = false, inferredWeek: Bool = false) -> NSImage {
         let template = (mode == .monochrome)
         let track = template ? NSColor(white: 0, alpha: 0.26) : NSColor.tertiaryLabelColor
+
+        // Composite the dormant corner pip (amendment 6) onto a finished glyph.
+        // With `pip == nil` (every pre-4a call site) this returns the glyph object
+        // untouched, so the output is byte-identical to the pre-4a renderer.
+        func finish(_ img: NSImage) -> NSImage {
+            guard let pip, let pc = pipColor(pip) else { return img }
+            let out = NSImage(size: img.size, flipped: false) { rect in
+                img.draw(in: rect)
+                drawCornerPip(glyphSize: img.size, color: pc)
+                return true
+            }
+            out.isTemplate = false      // the pip carries hue; do not template-tint it
+            return out
+        }
 
         /// Faint projected arc under the value arc — visible only across the
         /// current→projected span. Amber when the projection reaches the cap,
@@ -190,7 +373,7 @@ enum StatusRenderer {
             guard let projected, projected > current + 0.5 else { return nil }
             if template { return NSColor(white: 0, alpha: 0.35) }
             return projected >= 100 ? NSColor.systemOrange.withAlphaComponent(0.45)
-                                    : color(current, mode).withAlphaComponent(0.30)
+                                    : color(current, mode, provider: provider, role: role).withAlphaComponent(0.30)
         }
 
         // Concentric rings: a single activity-ring glyph in the app-icon style.
@@ -204,21 +387,32 @@ enum StatusRenderer {
                 let lw = d * 0.125
                 let outerR = d / 2 - lw / 2 - 0.4
                 let innerR = outerR - lw - 1.0
-                stroke(arcCenter: c, radius: outerR, from: 0, to: 360, clockwise: false, width: lw, color: track)
-                if let five, let ghost = ghostColor(five), let projected {
-                    stroke(arcCenter: c, radius: outerR, from: 90,
-                           to: 90 - 360 * min(1, projected / 100), clockwise: true, width: lw, color: ghost)
+                if inferredFive {
+                    // Inferred-zero (amendment 9): dashed, fill-less outer track,
+                    // marking a computed 0 rather than an observed value. Dormant.
+                    strokeDashedTrack(center: c, radius: outerR, width: lw, color: track)
+                } else {
+                    stroke(arcCenter: c, radius: outerR, from: 0, to: 360, clockwise: false, width: lw, color: track)
+                    if let five, let ghost = ghostColor(five), let projected {
+                        stroke(arcCenter: c, radius: outerR, from: 90,
+                               to: 90 - 360 * min(1, projected / 100), clockwise: true, width: lw, color: ghost)
+                    }
+                    if let five, five > 0 {
+                        let fill = template ? NSColor.black : color(five, mode, provider: provider, role: role)
+                        stroke(arcCenter: c, radius: outerR, from: 90,
+                               to: 90 - 360 * min(max(five / 100, 0), 1), clockwise: true, width: lw, color: fill)
+                    }
                 }
-                if let five, five > 0 {
-                    let fill = template ? NSColor.black : color(five, mode)
-                    stroke(arcCenter: c, radius: outerR, from: 90,
-                           to: 90 - 360 * min(max(five / 100, 0), 1), clockwise: true, width: lw, color: fill)
+                if inferredWeek {
+                    strokeDashedTrack(center: c, radius: innerR, width: lw, color: track)
+                } else {
+                    drawRing(center: c, radius: innerR, width: lw, value: week, mode: mode,
+                             template: template, track: track, provider: provider, role: role)
                 }
-                drawRing(center: c, radius: innerR, width: lw, value: week, mode: mode, template: template, track: track)
                 return true
             }
             img.isTemplate = template
-            return img
+            return finish(img)
         }
 
         // Single ring: the 5-hour window only, for people who watch just the
@@ -229,24 +423,30 @@ enum StatusRenderer {
                 let c = CGPoint(x: d / 2, y: height / 2)
                 let lw = d * 0.16
                 let r = d / 2 - lw / 2 - 0.4
-                stroke(arcCenter: c, radius: r, from: 0, to: 360, clockwise: false, width: lw, color: track)
-                if let five, let ghost = ghostColor(five), let projected {
-                    stroke(arcCenter: c, radius: r, from: 90,
-                           to: 90 - 360 * min(1, projected / 100), clockwise: true, width: lw, color: ghost)
-                }
-                if let five, five > 0 {
-                    let fill = template ? NSColor.black : color(five, mode)
-                    stroke(arcCenter: c, radius: r, from: 90,
-                           to: 90 - 360 * min(max(five / 100, 0), 1), clockwise: true, width: lw, color: fill)
+                if inferredFive {
+                    strokeDashedTrack(center: c, radius: r, width: lw, color: track)
+                } else {
+                    stroke(arcCenter: c, radius: r, from: 0, to: 360, clockwise: false, width: lw, color: track)
+                    if let five, let ghost = ghostColor(five), let projected {
+                        stroke(arcCenter: c, radius: r, from: 90,
+                               to: 90 - 360 * min(1, projected / 100), clockwise: true, width: lw, color: ghost)
+                    }
+                    if let five, five > 0 {
+                        let fill = template ? NSColor.black : color(five, mode, provider: provider, role: role)
+                        stroke(arcCenter: c, radius: r, from: 90,
+                               to: 90 - 360 * min(max(five / 100, 0), 1), clockwise: true, width: lw, color: fill)
+                    }
                 }
                 return true
             }
             img.isTemplate = template
-            return img
+            return finish(img)
         }
 
         // Bars: the only remaining style drawn as a side-by-side pair
-        // (percentages is text and never reaches this path).
+        // (percentages is text and never reaches this path). The inferred-zero
+        // flags do not apply to the bar glyph; 4b renders that state with the
+        // ring instrument, not the bar.
         let values = [five ?? 0, week ?? 0]
         let gaugeW: CGFloat = 7, gap: CGFloat = 5
         let size = NSSize(width: gaugeW * 2 + gap, height: height)
@@ -255,24 +455,81 @@ enum StatusRenderer {
             for (i, v) in values.enumerated() {
                 let x = CGFloat(i) * (gaugeW + gap)
                 let rect = CGRect(x: x, y: 1, width: gaugeW, height: height - 2)
-                let fill = template ? NSColor.black : color(v, mode)
+                let fill = template ? NSColor.black : color(v, mode, provider: provider, role: role)
                 drawBar(value: CGFloat(min(max(v / 100, 0), 1)), in: rect, fill: fill, track: track)
             }
             return true
         }
         img.isTemplate = template
+        return finish(img)
+    }
+
+    /// Compose two glyphs into one side-by-side "Both" image (amendment /
+    /// handoff: two 18 pt glyphs, 3 pt gap). Dormant in 4a; 4b builds `left` and
+    /// `right` from per-provider `image(...)` calls. Non-template because the two
+    /// glyphs may carry different provider hues.
+    static func sideBySide(_ left: NSImage, _ right: NSImage, gap: CGFloat = 3) -> NSImage {
+        let h = max(left.size.height, right.size.height)
+        let w = left.size.width + gap + right.size.width
+        let img = NSImage(size: NSSize(width: w, height: h), flipped: false) { _ in
+            left.draw(in: NSRect(x: 0, y: 0, width: left.size.width, height: left.size.height))
+            right.draw(in: NSRect(x: left.size.width + gap, y: 0,
+                                  width: right.size.width, height: right.size.height))
+            return true
+        }
+        img.isTemplate = false
         return img
     }
 
     /// One activity-ring: faint full track + colored arc from the top, clockwise.
+    /// `provider`/`role` default to `.claude`/`.primary`, so the pre-4a call path
+    /// (concentric inner ring) is unchanged.
     private static func drawRing(center c: CGPoint, radius: CGFloat, width lw: CGFloat,
-                                 value v: Double?, mode: ColorMode, template: Bool, track: NSColor) {
+                                 value v: Double?, mode: ColorMode, template: Bool, track: NSColor,
+                                 provider: UsageProviderKind = .claude, role: ProviderRole = .primary) {
         stroke(arcCenter: c, radius: radius, from: 0, to: 360, clockwise: false, width: lw, color: track)
         let val = min(max((v ?? 0) / 100, 0), 1)
         if val > 0 {
-            let fill = template ? NSColor.black : color(v ?? 0, mode)
+            let fill = template ? NSColor.black : color(v ?? 0, mode, provider: provider, role: role)
             stroke(arcCenter: c, radius: radius, from: 90, to: 90 - 360 * val, clockwise: true, width: lw, color: fill)
         }
+    }
+
+    /// Draw the bottom-right corner state pip into the CURRENT graphics context
+    /// for a glyph of `glyphSize`, per amendment 6: first blend-clear a knockout
+    /// gap (pip radius + 1 pt) so the pip separates from ring / track pixels on any
+    /// menu-bar background, then fill a 5 pt circle. Callers composite this into a
+    /// non-template NSImage so the pip keeps its hue. Dormant in 4a.
+    static func drawCornerPip(glyphSize s: NSSize, color: NSColor) {
+        let pipDiameter: CGFloat = 5
+        let pipR = pipDiameter / 2
+        let gapR = pipR + 1                     // knockout is pip radius + 1 pt
+        // Sit the pip fully inside the glyph, hard into the bottom-right corner.
+        let cx = s.width - pipR - 0.5
+        let cy = pipR + 0.5
+        guard let ctx = NSGraphicsContext.current else { return }
+        ctx.saveGraphicsState()
+        ctx.compositingOperation = .clear       // blend-clear the knockout gap
+        NSColor.black.setFill()                 // fill color is irrelevant under .clear
+        NSBezierPath(ovalIn: CGRect(x: cx - gapR, y: cy - gapR,
+                                    width: gapR * 2, height: gapR * 2)).fill()
+        ctx.restoreGraphicsState()
+        color.setFill()
+        NSBezierPath(ovalIn: CGRect(x: cx - pipR, y: cy - pipR,
+                                    width: pipDiameter, height: pipDiameter)).fill()
+    }
+
+    /// Stroke a full-circle track with a dashed pattern and NO value fill: the
+    /// inferred-zero ring (amendment 9), marking a value computed (window reset
+    /// passed, no newer event) rather than observed. Dormant in 4a.
+    private static func strokeDashedTrack(center c: CGPoint, radius: CGFloat, width lw: CGFloat, color: NSColor) {
+        let path = NSBezierPath()
+        path.appendArc(withCenter: c, radius: radius, startAngle: 0, endAngle: 360, clockwise: false)
+        path.lineWidth = lw
+        path.lineCapStyle = .round
+        path.setLineDash([lw * 0.9, lw * 1.4], count: 2, phase: 0)
+        color.setStroke()
+        path.stroke()
     }
 
     /// One rounded fuel bar: faint full track, filled from the bottom.
