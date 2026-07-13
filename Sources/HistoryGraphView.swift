@@ -27,6 +27,13 @@ struct GraphData {
     var provider: UsageProviderKind = .claude
     var forecastIdle: Bool = false
     var readoutPrefix: String? = nil
+    // Window shape (v0.10.1). The readout states the CURRENT windows, so a provider
+    // with no near-term window (Codex, weekly-only since 2026-07-12) drops that chunk
+    // rather than reading "5h --" forever. The plotted five SERIES is untouched: real
+    // 5-hour history from before the change is still drawn, it simply ends there.
+    var showFive: Bool = true
+    var fiveUnit: String = "5h"
+    var weekUnit: String = "wk"
 
     /// Cheap identity so the view can skip redraws when nothing meaningful changed
     /// (menuNeedsUpdate fires on every menu-tracking tick). The `now / 30` bucket lets a
@@ -40,7 +47,7 @@ struct GraphData {
         let p = projected.map { Int($0.rounded()) } ?? -1
         let r = fiveResetsAt.map { Int($0.timeIntervalSince1970) } ?? 0
         let ct = crossTime.map { Int($0.timeIntervalSince1970) / 60 } ?? -1
-        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(provider.rawValue)|\(forecastIdle)|\(readoutPrefix ?? "")|\(Int(now.timeIntervalSince1970) / 30)"
+        return "\(last)|\(samples.count)|\(mode.rawValue)|\(range.rawValue)|\(colorMode.rawValue)|\(f)|\(w)|\(p)|\(crosses)|\(r)|\(ct)|\(provider.rawValue)|\(forecastIdle)|\(readoutPrefix ?? "")|\(showFive)|\(fiveUnit)|\(weekUnit)|\(Int(now.timeIntervalSince1970) / 30)"
     }
 }
 
@@ -311,7 +318,13 @@ final class HistoryGraphView: NSView {
             ? Self.hmFormatter.string(from: h.t)
             : "\(Self.dayFormatter.string(from: h.t)) \(Self.hmFormatter.string(from: h.t))"
         func pct(_ v: Double?) -> String { v == nil ? "—" : "\(Int(v!.rounded()))%" }
-        let label = "\(timeLabel)  5h \(pct(h.five))  wk \(pct(h.week))"
+        // Per-POINT, not per-model: a Codex history that spans the weekly-only change
+        // has real 5-hour samples before it and none after, and the chip should say so
+        // at each end rather than print "5h —" across the whole series.
+        var parts = [timeLabel]
+        if let five = h.five { parts.append("\(m.fiveUnit) \(pct(five))") }
+        if let week = h.week { parts.append("\(m.weekUnit) \(pct(week))") }
+        let label = parts.joined(separator: "  ")
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
         let size = (label as NSString).size(withAttributes: [.font: font])
         var x = h.x + 7
@@ -428,9 +441,11 @@ final class HistoryGraphView: NSView {
                                : StatusRenderer.color(v!, m.colorMode, provider: m.provider)
             s.append(NSAttributedString(string: vs, attributes: [.font: f, .foregroundColor: col]))
         }
-        add("5h ", m.fiveNow)
-        s.append(NSAttributedString(string: "   ", attributes: [.font: f]))
-        add("wk ", m.weekNow)
+        if m.showFive {
+            add(m.fiveUnit + " ", m.fiveNow)
+            s.append(NSAttributedString(string: "   ", attributes: [.font: f]))
+        }
+        add(m.weekUnit + " ", m.weekNow)
         let sz = s.size()
         // Always top-LEFT (amendment 26a, Stefan-ruled). v0.8 kept the readout
         // top-right and moved it left only while the forecast zone owned the right

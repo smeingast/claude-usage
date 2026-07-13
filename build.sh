@@ -19,7 +19,7 @@ MIN_MACOS="13.0"
 NOTARY_PROFILE="${CLAUDE_USAGE_NOTARY_PROFILE:-claude-usage-notary}"
 
 # Release version. Override per release: CLAUDE_USAGE_VERSION=0.10 ./build.sh --notarize
-VERSION="${CLAUDE_USAGE_VERSION:-0.10}"
+VERSION="${CLAUDE_USAGE_VERSION:-0.10.1}"
 # Monotonic build number from commit count (falls back to 1 outside a git checkout).
 BUILD_NUM="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 

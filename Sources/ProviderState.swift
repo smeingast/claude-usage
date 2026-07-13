@@ -48,7 +48,7 @@ struct CodexDerived {
     var hasData: Bool
     var fresh: Bool
     var aged: Bool
-    var isRed: Bool
+    var isRed: Bool              // the HEADLINE window is >= 90 (drives kind and pip)
     var forecastActive: Bool     // draw the projection/forecast at all
     var inferredFive: Bool       // 5-hour window rolled -> dashed outer ring
     var inferredWeek: Bool       // weekly window rolled -> dashed inner ring
@@ -66,6 +66,19 @@ struct CodexDerived {
     var pip: PipSeverity
     var projFive: Double?        // forecast projection (for the ring ghost); nil when idle
     var crossTime: Date?         // when the projection reaches 100 (pace); nil otherwise
+    // Window shape (2026-07-12: Codex went weekly-only for plus accounts). The near-term
+    // slot is OPTIONAL now, so the views take the shape from here instead of assuming a
+    // 5-hour window exists. Titles/units are data-driven, so a window length neither
+    // side of this app has seen before is still labeled honestly rather than as "5-hour".
+    var hasFive: Bool            // Codex reported a near-term window at all
+    var fiveTitle: String        // "5-hour"
+    var weekTitle: String        // "Weekly"
+    var fiveUnit: String         // "5h"
+    var weekUnit: String         // "wk"
+    var fiveIsRed: Bool          // the 5-hour FIGURE is red (never when there is no such window)
+    var weekIsRed: Bool          // the weekly figure is red (only when it is the headline)
+    var headResetsAt: Date?      // reset of the window the chain keyed on
+    var headWindowMinutes: Int?  // its length, for callers picking a date format
 }
 
 enum ProviderState {
@@ -250,85 +263,128 @@ enum ProviderState {
         let ageSec = observedAt.map { now.timeIntervalSince($0) } ?? .greatestFiniteMagnitude
         let fresh = ageSec <= freshWindow
 
+        // The windows arrive SLOTTED BY LENGTH (`CodexUsageClient.slot`), so `primary`
+        // is the near-term window and `secondary` the weekly one whatever order the
+        // rollout log listed them in -- and EITHER can be absent. Since 2026-07-12
+        // Codex reports plus accounts as weekly-only, so the chain keys on the HEADLINE
+        // window (the near-term one when it exists, else the only window there is)
+        // rather than on a 5-hour slot that may now be empty: a 95% weekly with no
+        // near-term window has to read as red, not as calm.
+        let nearW = snap.primary
+        let weekW = snap.secondary
+        let headIsWeek = nearW == nil && weekW != nil
+        let headW = nearW ?? weekW
+
         // Per-window effective values: a rolled window reads 0 (inferred), and only
         // that window's ring is dashed / figure struck.
-        let effFive = snap.primary.map { effectiveUtilization($0, freshness: snap.freshness, now: now) }
-        let effWeek = snap.secondary.map { effectiveUtilization($0, freshness: snap.freshness, now: now) }
+        let effFive = nearW.map { effectiveUtilization($0, freshness: snap.freshness, now: now) }
+        let effWeek = weekW.map { effectiveUtilization($0, freshness: snap.freshness, now: now) }
         let inferredFive = effFive?.inferredZero ?? false
         let inferredWeek = effWeek?.inferredZero ?? false
         let five: Double? = effFive?.value
         let week: Double? = effWeek?.value
-        let rawFive = snap.primary?.utilization
-        let rawWeek = snap.secondary?.utilization
+        let rawFive = nearW?.utilization
+        let rawWeek = weekW?.utilization
+
+        // Everything the chain and the copy key on, resolved to the headline window.
+        // With the old two-window shape these are the 5-hour values exactly, so the
+        // whole derivation below is unchanged for it.
+        let head: Double? = headIsWeek ? week : five
+        let headResetsAt = headW?.resetsAt
+        let inferredHead = headIsWeek ? inferredWeek : inferredFive
 
         // The forecast is drawn only for a live, non-rolled 5-hour window with a
-        // positive computed rate and a reset still ahead (amendment 2 / brief).
-        let fiveResetsAt = snap.primary?.resetsAt
+        // positive computed rate and a reset still ahead (amendment 2 / brief). It is
+        // 5-hour-SHAPED (Forecast clips its sampling window to reset - 5h), so it does
+        // not run at all without a real near-term window: a weekly burn rate projected
+        // over days is not a forecast this app makes.
+        let fiveResetsAt = nearW?.resetsAt
         let resetInFuture = fiveResetsAt.map { $0 > now } ?? false
         let rate = forecast?.ratePerHour ?? 0
-        let forecastActive = !inferredFive && rate > 0 && ageSec <= forecastMaxAge && resetInFuture
+        let forecastActive = nearW != nil && !inferredFive && rate > 0
+            && ageSec <= forecastMaxAge && resetInFuture
         let crosses = forecastActive && (forecast?.crosses ?? false)
         let crossTime = forecastActive ? forecast?.crossTime : nil
         let projFive: Double? = forecastActive ? forecast?.projected : nil
 
-        let f = five ?? 0
-        let isRed = !inferredFive && f >= 90
+        let f = head ?? 0
+        let isRed = !inferredHead && f >= 90
         let kind: CodexStateKind = {
-            if inferredFive { return .inferredZero }
+            if inferredHead { return .inferredZero }
             if isRed { return .red }
             if crosses { return .pace }
             if f >= 70 { return .watch }
             return .normal
         }()
-        let aged = !fresh && !inferredFive
+        let aged = !fresh && !inferredHead
 
-        // The NEXT 5-hour reset for the inferred-zero copy: the rolled window's
-        // resets_at plus its own length (the observed reset already passed).
+        // The NEXT reset for the inferred-zero copy: the rolled window's resets_at plus
+        // its OWN length (the observed reset already passed).
         let nextReset: Date? = {
-            guard inferredFive, let passed = snap.primary?.resetsAt else { return fiveResetsAt }
-            let len = snap.primary?.windowMinutes.map { TimeInterval($0 * 60) } ?? (5 * 3600)
+            guard inferredHead, let passed = headResetsAt else { return headResetsAt }
+            let len = headW?.windowMinutes.map { TimeInterval($0 * 60) } ?? (5 * 3600)
             return passed.addingTimeInterval(len)
         }()
 
         // Age line: "as of HH:MM" (+ " · Nh ago" only when genuinely aged).
         let ageLine: String = {
             guard let obs = observedAt else { return "as of \u{2014}" }
-            if inferredFive || fresh { return "as of " + hm.string(from: obs) }
+            if inferredHead || fresh { return "as of " + hm.string(from: obs) }
             return "as of " + hm.string(from: obs) + " \u{00B7} " + relAge(ageSec)
         }()
 
-        let projSettle = pctInt(projFive ?? five)
+        let projSettle = pctInt(projFive ?? head)
+        // How the copy names the headline reset. A 5-hour reset is a clock time today,
+        // so "resets 13:40" is unambiguous; a weekly reset is DAYS out, where a bare
+        // "03:00" would not say which day, so a long window names the distance instead.
+        // The old two-window shape always heads on the 5-hour window and so keeps the
+        // clock-time copy verbatim.
+        let headResetCopy: String = {
+            guard let r = headResetsAt else { return "\u{2014}" }
+            let longWindow = (headW?.windowMinutes ?? 300) >= 1440
+            return longWindow ? "in " + rel(r.timeIntervalSince(now)) : hm.string(from: r)
+        }()
         // Codex copy is TERSE (amendment 20): short middot-joined fragments, not
         // prose; the concept's verbatim sentences are overruled for Codex. A fresh
         // normal state returns "" (amendment 19: no banner in the calm state).
         var msg: String = {
-            if inferredFive {
-                let passed = snap.primary?.resetsAt
-                return "Window reset \(hmOrDash(passed, hm)) passed idle \u{00B7} reads 0% until Codex runs \u{00B7} next reset \(hmOrDash(nextReset, hm))."
+            if inferredHead {
+                let next = nextReset.map { d -> String in
+                    let longWindow = (headW?.windowMinutes ?? 300) >= 1440
+                    return longWindow ? "in " + rel(d.timeIntervalSince(now)) : hm.string(from: d)
+                } ?? "\u{2014}"
+                return "Window reset \(hmOrDash(headResetsAt, hm)) passed idle \u{00B7} reads 0% until Codex runs \u{00B7} next reset \(next)."
             }
             if !fresh {
                 return "Idle since \(hmOrDash(observedAt, hm)) (\(relAge(ageSec))) \u{00B7} forecast paused."
             }
             switch kind {
             case .red:
-                return "Red zone \u{00B7} \(100 - pctInt(five))% headroom \u{00B7} resets \(hmOrDash(fiveResetsAt, hm))."
+                return "Red zone \u{00B7} \(100 - pctInt(head))% headroom \u{00B7} resets \(headResetCopy)."
             case .pace:
-                return "On pace for 100% ~\(hmOrDash(crossTime, hm)) \u{00B7} resets \(hmOrDash(fiveResetsAt, hm))."
+                return "On pace for 100% ~\(hmOrDash(crossTime, hm)) \u{00B7} resets \(headResetCopy)."
             case .watch:
-                return "\(pctInt(five))% used \u{00B7} ~\(projSettle)% by the \(hmOrDash(fiveResetsAt, hm)) reset."
+                // The settle clause is a FORECAST claim: without a near-term window
+                // there is no forecast to make, so the copy names the reset instead of
+                // restating the current value as a projection.
+                return headIsWeek
+                    ? "\(pctInt(head))% used \u{00B7} resets \(headResetCopy)."
+                    : "\(pctInt(head))% used \u{00B7} ~\(projSettle)% by the \(headResetCopy) reset."
             default:
                 return ""
             }
         }()
         // A weekly-only roll (amendment 9: inferred-zero is per-window) is appended
-        // to whatever message is showing: the chain stays keyed on the 5-hour window,
+        // to whatever message is showing -- unless the weekly window IS the headline
+        // (no near-term window), in which case the inferred-zero copy above already
+        // leads with it. The chain otherwise stays keyed on the 5-hour window,
         // but the rolled weekly window must still be named. On an empty base (fresh
         // normal, which shows no banner of its own) the fragment stands alone,
         // capitalized, so the weekly caveat still forces a banner (amendment 19
         // removes only the CALM banner, never an honesty caveat). When BOTH windows
         // rolled, the 5-hour inferred copy above leads and the weekly roll stays
         // visible as its dashed ring + struck figure.
-        if inferredWeek && !inferredFive {
+        if inferredWeek && !headIsWeek && !inferredFive {
             if msg.isEmpty {
                 msg = "Weekly reset passed, weekly reads 0%."
             } else {
@@ -356,21 +412,35 @@ enum ProviderState {
             inferredFive: inferredFive, inferredWeek: inferredWeek,
             five: five, week: week, rawFive: rawFive, rawWeek: rawWeek,
             planType: snap.planType,
-            fiveResetsAt: fiveResetsAt, weekResetsAt: snap.secondary?.resetsAt,
+            fiveResetsAt: fiveResetsAt, weekResetsAt: weekW?.resetsAt,
             observedAt: observedAt, ageLine: ageLine, ageWarn: aged, msg: msg,
-            pip: pip, projFive: projFive, crossTime: crossTime)
+            pip: pip, projFive: projFive, crossTime: crossTime,
+            hasFive: nearW != nil,
+            fiveTitle: nearW?.title ?? "5-hour",
+            weekTitle: weekW?.title ?? "Weekly",
+            fiveUnit: CodexUsageClient.windowUnit(minutes: nearW?.windowMinutes),
+            weekUnit: CodexUsageClient.windowUnit(minutes: weekW?.windowMinutes),
+            fiveIsRed: isRed && !headIsWeek, weekIsRed: isRed && headIsWeek,
+            headResetsAt: headResetsAt, headWindowMinutes: headW?.windowMinutes)
     }
 
     private nonisolated static func blankCodex(kind: CodexStateKind, installed: Bool,
                                                msg: String, ageLine: String,
                                                pip: PipSeverity) -> CodexDerived {
+        // No reading at all: the shape defaults to the familiar two windows, so the
+        // empty instrument still reads "5-hour --  / Weekly --" rather than announcing
+        // a missing near-term window it has no evidence for.
         CodexDerived(kind: kind, installed: installed, hasData: false, fresh: false,
                      aged: false, isRed: false, forecastActive: false,
                      inferredFive: false, inferredWeek: false, five: nil, week: nil,
                      rawFive: nil, rawWeek: nil, planType: nil,
                      fiveResetsAt: nil, weekResetsAt: nil,
                      observedAt: nil, ageLine: ageLine, ageWarn: false, msg: msg,
-                     pip: pip, projFive: nil, crossTime: nil)
+                     pip: pip, projFive: nil, crossTime: nil,
+                     hasFive: true, fiveTitle: "5-hour", weekTitle: "Weekly",
+                     fiveUnit: "5h", weekUnit: "wk",
+                     fiveIsRed: false, weekIsRed: false,
+                     headResetsAt: nil, headWindowMinutes: nil)
     }
 
     // MARK: - Sessions split header (amendment 11)

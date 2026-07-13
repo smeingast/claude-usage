@@ -216,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // backfill from .distantPast or duplicate stored samples.
         let codexStore = codexHistoryStore
         Task.detached(priority: .utility) {
-            let loaded = codexStore.load(maxAge: maxAge)
+            let loaded = Self.repairCodexSamples(codexStore.load(maxAge: maxAge))
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.codexHistory = self.mergeHistory(loaded, self.codexHistory)
@@ -645,18 +645,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let xInfW = codexDerived?.inferredWeek ?? false
         let xProj = (codexDerived?.forecastActive ?? false) ? codexDerived?.projFive : nil
 
+        // Only Codex can be a one-window provider; Claude's API keeps both windows.
+        let xSingle = codexHidesFive()
+
         if style == .percentages {
             let attr: NSAttributedString
             switch bar {
             case .primary, .both:
                 // Text can't stack two providers cleanly; Both falls back to the
                 // primary's numbers.
-                let (f, w) = primary == .claude ? (cFive, cWeek) : (xFive, xWeek)
-                attr = StatusRenderer.percentText(f, w, mode, barFont)
+                let codexLeads = primary == .codex
+                let (f, w) = codexLeads ? (xFive, xWeek) : (cFive, cWeek)
+                attr = StatusRenderer.percentText(f, w, mode, barFont,
+                                                  singleWindow: codexLeads && xSingle)
             case .claude:
                 attr = StatusRenderer.percentText(cFive, cWeek, mode, barFont)
             case .codex:
-                attr = StatusRenderer.percentText(xFive, xWeek, mode, barFont)
+                attr = StatusRenderer.percentText(xFive, xWeek, mode, barFont,
+                                                  singleWindow: xSingle)
             }
             button.image = nil
             button.imagePosition = .noImage
@@ -669,7 +675,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             func codexGlyph() -> NSImage {
                 StatusRenderer.image(five: xFive, week: xWeek, style: style, mode: mode,
                                      projected: xProj, provider: .codex,
-                                     inferredFive: xInfF, inferredWeek: xInfW)
+                                     inferredFive: xInfF, inferredWeek: xInfW,
+                                     singleWindow: xSingle)
             }
             let img: NSImage
             switch bar {
@@ -692,8 +699,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func twoProviderTooltip() -> String {
         var tip = snapshot.map { Self.tooltipText($0, lastError: lastError) } ?? (lastError ?? "Loading…")
         if let cd = codexDerived, cd.hasData {
-            tip += "\nCodex 5-hour: \(Self.percent(cd.five))"
-            if cd.week != nil { tip += "\nCodex Weekly: \(Self.percent(cd.week))" }
+            // Only the windows Codex actually reports: a weekly-only account has no
+            // 5-hour line to state.
+            if cd.hasFive { tip += "\nCodex \(cd.fiveTitle): \(Self.percent(cd.five))" }
+            if cd.week != nil { tip += "\nCodex \(cd.weekTitle): \(Self.percent(cd.week))" }
         }
         return tip
     }
@@ -809,7 +818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headerView.configure(PanelHeaderModel(
             five: five, week: cd?.week,
             projected: (cd?.forecastActive ?? false) ? cd?.projFive : nil,
-            fiveIsRed: cd?.isRed ?? false,
+            fiveIsRed: cd?.fiveIsRed ?? false,
             fiveResetAbs: fr.map { "resets \(Self.dailyResetFormatter.string(from: $0))" },
             fiveResetRel: fr.map { "in \(Self.rel($0.timeIntervalSince(now)))" },
             weekResetAbs: wr.map { "resets \(Self.weeklyResetFormatter.string(from: $0))" },
@@ -817,7 +826,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             signedOut: !(cd?.hasData ?? false),
             provider: .codex,
             inferredFive: cd?.inferredFive ?? false,
-            inferredWeek: cd?.inferredWeek ?? false))
+            inferredWeek: cd?.inferredWeek ?? false,
+            fiveTitle: cd?.fiveTitle ?? "5-hour",
+            weekTitle: cd?.weekTitle ?? "Weekly",
+            weekIsRed: cd?.weekIsRed ?? false,
+            hideFive: codexHidesFive()))
+    }
+
+    /// Whether the Codex surfaces should drop their near-term slot: only when there IS
+    /// a reading and it carried no near-term window. A Codex with no data at all keeps
+    /// the familiar two-window skeleton (it has no evidence for either shape).
+    private func codexHidesFive() -> Bool {
+        guard let cd = codexDerived, cd.hasData else { return false }
+        return !cd.hasFive
     }
 
     /// The strip sub-banner's bullet color: the pip severity's color, falling back
@@ -842,9 +863,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func codexStripModel(now: Date) -> StripModel {
         let cd = codexDerived
         let hasData = cd?.hasData ?? false
+        // The reset line names the HEADLINE window's reset, which is the weekly one for
+        // a Codex with no near-term window. A window a day or longer needs the weekday
+        // in front of the clock time, or "resets 03:00" would not say which day.
         let resetLine: String? = {
-            guard hasData, let fr = cd?.fiveResetsAt else { return nil }
-            return "resets \(Self.dailyResetFormatter.string(from: fr)) \u{00B7} \(Self.rel(fr.timeIntervalSince(now)))"
+            guard hasData, let r = cd?.headResetsAt else { return nil }
+            let long = (cd?.headWindowMinutes ?? 300) >= 1440
+            let fmt = long ? Self.weeklyResetFormatter : Self.dailyResetFormatter
+            return "resets \(fmt.string(from: r)) \u{00B7} \(Self.rel(r.timeIntervalSince(now)))"
         }()
         // The honesty sub-banner shows for any inferred window (amendment 9 treats
         // the weekly roll first-class; its appended msg sentence must be visible) as
@@ -858,11 +884,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             noDataMessage: hasData ? nil : cd?.msg,
             ageLine: cd?.ageLine ?? "", ageWarn: cd?.ageWarn ?? false,
             five: cd?.five, week: cd?.week, mode: Settings.colorMode,
-            fiveIsRed: cd?.isRed ?? false,
+            fiveIsRed: cd?.fiveIsRed ?? false,
             inferredFive: cd?.inferredFive ?? false, inferredWeek: cd?.inferredWeek ?? false,
             rawFivePct: (cd?.inferredFive ?? false) ? cd?.rawFive.map { Int($0.rounded()) } : nil,
             rawWeekPct: (cd?.inferredWeek ?? false) ? cd?.rawWeek.map { Int($0.rounded()) } : nil,
-            resetLine: resetLine, subBanner: sub, otherLabel: "Claude")
+            resetLine: resetLine, subBanner: sub, otherLabel: "Claude",
+            fiveUnit: cd?.fiveUnit ?? "5h", weekUnit: cd?.weekUnit ?? "wk",
+            weekIsRed: cd?.weekIsRed ?? false, hideFive: codexHidesFive())
     }
 
     private func claudeStripModel(now: Date) -> StripModel {
@@ -1141,7 +1169,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 crosses: active && (codexForecast?.crosses ?? false),
                 crossTime: active ? cd?.crossTime : nil,
                 provider: .codex, forecastIdle: !active,
-                readoutPrefix: prefix)
+                readoutPrefix: prefix,
+                showFive: !codexHidesFive(),
+                fiveUnit: cd?.fiveUnit ?? "5h", weekUnit: cd?.weekUnit ?? "wk")
         }
         return GraphData(
             samples: history.filter { $0.t >= cutoff },
@@ -1217,6 +1247,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastCodexDiskTrimAt = Date()
             let maxAge = historyMaxAge
             Task.detached(priority: .utility) { store.trim(maxAge: maxAge) }
+        }
+    }
+
+    /// Re-slot Codex samples recorded BEFORE windows were keyed by length. Builds up to
+    /// v0.10 mapped the event's `rate_limits.primary` straight into the sample's 5-hour
+    /// field, so every sample taken after Codex went weekly-only (2026-07-12) stored the
+    /// WEEKLY figure, and its weekly reset, as 5-hour data. Left alone those samples
+    /// graph a weekly series as a 5-hour one for as long as they are retained (32 days).
+    ///
+    /// The tell is exact, not a guess: a real 5-hour window cannot reset more than five
+    /// hours after the reading that observed it. A sample whose 5-hour slot resets
+    /// further out than that was never a 5-hour window, so it moves to the weekly slot.
+    /// Samples that carry both windows are never touched, so genuine old-shape history
+    /// passes through untouched. In memory only; the file is left alone and ages out.
+    nonisolated static func repairCodexSamples(_ samples: [HistorySample]) -> [HistorySample] {
+        let slack: TimeInterval = 10 * 60      // clock skew between the event and its reset
+        return samples.map { s in
+            guard s.week == nil, let five = s.five, let reset = s.fiveResetsAt,
+                  reset.timeIntervalSince(s.t) > Forecast.fiveWindow + slack else { return s }
+            return HistorySample(t: s.t, five: nil, week: five,
+                                 fiveResetsAt: nil, weekResetsAt: reset)
         }
     }
 

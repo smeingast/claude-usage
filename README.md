@@ -7,7 +7,7 @@
 <p align="center">
   A tiny native macOS menu-bar app that shows how much headroom is left in your
   <b>Claude</b> and <b>OpenAI Codex</b> rate limits: the <b>5-hour</b> and
-  <b>weekly</b> window for each.
+  <b>weekly</b> window, whichever of them your account reports.
 </p>
 
 <p align="center">
@@ -54,6 +54,12 @@ percentage and reset time in absolute and relative form ("resets 17:40 · in
 fainter arc extends the outer ring to the projected value and turns amber once
 the projection reaches 100%.
 
+Codex does not always report both windows. Since 12 July 2026 it has reported
+some accounts as weekly-only, and Headroom takes each window from the
+`window_minutes` the log carries rather than from its position, so it shows what
+the account actually has. A provider with one window is drawn as a single ring,
+with that window's value in the headline slot.
+
 The other provider sits just below in a compact secondary card with small rings,
 inline numbers, and a reset line. A **Lead** button swaps the two in place: the
 provider you promote takes the large rings (and the menu-bar readout, when the
@@ -95,8 +101,8 @@ the last log entry and no more; the app does not pretend otherwise.
 
 Pick how the menu-bar readout looks with the **Style** popup in **Settings →
 Menu Bar** (choose **Settings…** in the dropdown): **Concentric rings**
-(default; outer = 5-hour, inner = weekly), a **Single ring (5-hour)**
-showing just the near-term window, **Percentages**, or **Bars**. The ring styles
+(default; outer = 5-hour, inner = weekly), a **Single ring (main limit)**
+showing just that provider's main window, **Percentages**, or **Bars**. The ring styles
 carry the forecast arc described above; percentages and bars stay static.
 Earlier versions offered four more styles (twin rings, gauges, pie slices,
 segments); these were retired in v0.6 since they either duplicated the concentric
@@ -232,7 +238,7 @@ never touch the repo.
 | Claude sessions | Live Claude Code sessions on this Mac (project, model, status, context tokens), read from `~/.claude/sessions/*.json` and each session's transcript tail. Local only; undocumented internal state, so liable to change between CLI versions |
 | Codex sessions | Interactive Codex sessions (`source == "cli"`) from the same rollout logs: project, model, context tokens, active or recent. `codex exec` runs are counted, not listed. Local only, undocumented log format, liable to change |
 | Usage history | Past 5-hour and weekly utilization, sampled on each successful poll into append-only files under Application Support (one per provider) and trimmed to about 32 days. Local only |
-| Forecast | The last hour's fill rate, measured within the current 5-hour window and projected linearly to its reset. Drives the dotted graph projection and the arc on the ring glyphs; computed locally per provider, and paused for Codex whenever its log is idle |
+| Forecast | The last hour's fill rate, measured within the current 5-hour window and projected linearly to its reset. Drives the dotted graph projection and the arc on the ring glyphs; computed locally per provider, and paused for Codex whenever its log is idle or its account reports no 5-hour window |
 | Display | `NSStatusItem` rendered as text or a drawn glyph: 4 styles × 5 color modes, one or both providers per **Bar Shows** |
 | Footprint | Menu-bar only (`LSUIElement`); optional Dock icon; launch-at-login via `SMAppService` |
 

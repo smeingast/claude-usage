@@ -76,6 +76,18 @@ struct PanelHeaderModel {
     var provider: UsageProviderKind = .claude
     var inferredFive: Bool = false
     var inferredWeek: Bool = false
+    // Window shape (v0.10.1). Codex may report only ONE window (weekly-only since
+    // 2026-07-12), and its labels are data-driven. The defaults are the two-window
+    // Claude shape with its literal v0.8 labels, so every existing caller renders
+    // exactly what it did before.
+    var fiveTitle: String = "5-hour"
+    var weekTitle: String = "Weekly"
+    var weekIsRed: Bool = false
+    /// No near-term window exists: drop its line rather than print an em-dash under a
+    /// "5-hour" label, and promote the one window there is to the headline. Explicit,
+    /// NOT inferred from `five == nil`: a signed-out Claude also has no value, and it
+    /// must keep showing both labeled rows.
+    var hideFive: Bool = false
 }
 
 /// The instrument: concentric rings (outer = 5-hour, inner = weekly, same
@@ -100,7 +112,10 @@ final class PanelHeaderView: NSView {
         model = m
         let five = m.five.map { "\(Int($0.rounded())) percent" } ?? "unknown"
         let week = m.week.map { "\(Int($0.rounded())) percent" } ?? "unknown"
-        setAccessibilityLabel(m.signedOut ? "Signed out" : "5-hour \(five), weekly \(week)")
+        let label = m.hideFive
+            ? "\(m.weekTitle) \(week)"
+            : "\(m.fiveTitle) \(five), \(m.weekTitle.lowercased()) \(week)"
+        setAccessibilityLabel(m.signedOut ? "Signed out" : label)
         needsDisplay = true
         displayIfNeeded()
     }
@@ -134,7 +149,25 @@ final class PanelHeaderView: NSView {
         func pct(_ v: Double?) -> String { v == nil ? "—" : "\(Int(v!.rounded()))%" }
 
         let line1Y: CGFloat = 16
-        PanelStyle.draw("5-hour", at: NSPoint(x: x0, y: line1Y + 8), font: labelFont, color: .secondaryLabelColor)
+
+        // One-window provider: the sole window takes the headline line, in the headline
+        // font, and there is no second line. The outer ring stays an empty track, which
+        // together with the missing row says "no near-term window" -- where "5-hour --"
+        // would have claimed a window that does not exist.
+        if m.hideFive {
+            PanelStyle.draw(m.weekTitle, at: NSPoint(x: x0, y: line1Y + 8), font: labelFont, color: .secondaryLabelColor)
+            let weekColor: NSColor = m.weekIsRed ? .systemRed : .labelColor
+            PanelStyle.draw(pct(m.week), at: NSPoint(x: x0 + 52, y: line1Y), font: bigFont, color: weekColor)
+            if let abs = m.weekResetAbs {
+                PanelStyle.drawRight(abs, rightEdge: rightEdge, y: line1Y + 2, font: resetFont, color: .tertiaryLabelColor)
+            }
+            if let rel = m.weekResetRel {
+                PanelStyle.drawRight(rel, rightEdge: rightEdge, y: line1Y + 16, font: resetBold, color: .secondaryLabelColor)
+            }
+            return
+        }
+
+        PanelStyle.draw(m.fiveTitle, at: NSPoint(x: x0, y: line1Y + 8), font: labelFont, color: .secondaryLabelColor)
         let fiveColor: NSColor = m.fiveIsRed ? .systemRed : .labelColor
         PanelStyle.draw(pct(m.five), at: NSPoint(x: x0 + 52, y: line1Y), font: bigFont, color: fiveColor)
         if let abs = m.fiveResetAbs {
@@ -145,7 +178,7 @@ final class PanelHeaderView: NSView {
         }
 
         let line2Y: CGFloat = 54
-        PanelStyle.draw("Weekly", at: NSPoint(x: x0, y: line2Y + 4), font: labelFont, color: .secondaryLabelColor)
+        PanelStyle.draw(m.weekTitle, at: NSPoint(x: x0, y: line2Y + 4), font: labelFont, color: .secondaryLabelColor)
         PanelStyle.draw(pct(m.week), at: NSPoint(x: x0 + 52, y: line2Y), font: midFont, color: .secondaryLabelColor)
         if let abs = m.weekResetAbs {
             PanelStyle.drawRight(abs, rightEdge: rightEdge, y: line2Y, font: resetFont, color: .tertiaryLabelColor)
@@ -165,7 +198,7 @@ final class PanelHeaderView: NSView {
         PanelRings.draw(in: rect, five: m.five, week: m.week, projected: m.projected,
                         mode: Settings.colorMode, provider: m.provider,
                         inferredFive: m.inferredFive, inferredWeek: m.inferredWeek,
-                        signedOut: m.signedOut)
+                        signedOut: m.signedOut, singleWindow: m.hideFive)
     }
 }
 

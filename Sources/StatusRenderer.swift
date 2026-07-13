@@ -11,10 +11,14 @@ import AppKit
 enum DisplayStyle: String, CaseIterable {
     case concentric, single, percentages, bars
 
+    /// The `.single` style draws each provider's MAIN limit, which is not always the
+    /// 5-hour one: Codex has reported some accounts as weekly-only since 2026-07-12,
+    /// and there the single ring is that weekly window. The label says "main limit"
+    /// rather than naming a window length the app cannot promise.
     var title: String {
         switch self {
         case .concentric:  return "Concentric rings"
-        case .single:      return "Single ring (5-hour)"
+        case .single:      return "Single ring (main limit)"
         case .percentages: return "Percentages"
         case .bars:        return "Bars"
         }
@@ -325,12 +329,16 @@ enum StatusRenderer {
         }
     }
 
-    static func percentText(_ five: Double?, _ week: Double?, _ mode: ColorMode, _ font: NSFont) -> NSAttributedString {
+    static func percentText(_ five: Double?, _ week: Double?, _ mode: ColorMode, _ font: NSFont,
+                            singleWindow: Bool = false) -> NSAttributedString {
         func chunk(_ v: Double?) -> NSAttributedString {
             let str = v == nil ? "—" : "\(Int(v!.rounded()))%"
             let col = v == nil ? NSColor.labelColor : color(v!, mode)
             return NSAttributedString(string: str, attributes: [.font: font, .foregroundColor: col])
         }
+        // One window -> the value alone. "— / 26%" would print an em-dash for a 5-hour
+        // window this provider does not have.
+        if singleWindow { return chunk(week) }
         let s = NSMutableAttributedString()
         s.append(chunk(five))
         s.append(NSAttributedString(string: " / ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
@@ -360,9 +368,23 @@ enum StatusRenderer {
     static func image(five: Double?, week: Double?, style: DisplayStyle, mode: ColorMode,
                       height: CGFloat = barHeight, projected: Double? = nil,
                       provider: UsageProviderKind = .claude, role: ProviderRole = .primary,
-                      inferredFive: Bool = false, inferredWeek: Bool = false) -> NSImage {
+                      inferredFive: Bool = false, inferredWeek: Bool = false,
+                      singleWindow: Bool = false) -> NSImage {
         let template = (mode == .monochrome)
         let track = template ? NSColor(white: 0, alpha: 0.26) : NSColor.tertiaryLabelColor
+
+        // A provider that reports only ONE window (Codex, weekly-only since 2026-07-12)
+        // has no near-term value at all. Its sole window is promoted into the HEADLINE
+        // slot and the companion ring/bar is not drawn: an empty outer ring or a zeroed
+        // first bar would read as a 5-hour window sitting at zero, the one claim this
+        // shape cannot make -- and `.single`, which draws the 5-hour window alone, would
+        // otherwise render a completely blank glyph. Off by default, so Claude and the
+        // two-window Codex shape are pixel-identical to before (the render goldens pin
+        // this).
+        let five = singleWindow ? week : five
+        let week: Double? = singleWindow ? nil : week
+        let inferredFive = singleWindow ? inferredWeek : inferredFive
+        let inferredWeek = singleWindow ? false : inferredWeek
 
         /// Faint projected arc under the value arc — visible only across the
         /// current→projected span. Amber when the projection reaches the cap,
@@ -402,11 +424,15 @@ enum StatusRenderer {
                                to: 90 - 360 * min(max(five / 100, 0), 1), clockwise: true, width: lw, color: fill)
                     }
                 }
-                if inferredWeek {
-                    strokeDashedTrack(center: c, radius: innerR, width: lw, color: track)
-                } else {
-                    drawRing(center: c, radius: innerR, width: lw, value: week, mode: mode,
-                             template: template, track: track, provider: provider, role: role)
+                // The companion ring is omitted entirely for a one-window provider: the
+                // outer ring above already carries its sole value.
+                if !singleWindow {
+                    if inferredWeek {
+                        strokeDashedTrack(center: c, radius: innerR, width: lw, color: track)
+                    } else {
+                        drawRing(center: c, radius: innerR, width: lw, value: week, mode: mode,
+                                 template: template, track: track, provider: provider, role: role)
+                    }
                 }
                 return true
             }
@@ -446,9 +472,13 @@ enum StatusRenderer {
         // (percentages is text and never reaches this path). The inferred-zero
         // flags do not apply to the bar glyph; 4b renders that state with the
         // ring instrument, not the bar.
-        let values = [five ?? 0, week ?? 0]
+        // One window -> one bar (the remap above already moved its value into `five`).
+        // The glyph narrows to a single gauge rather than pairing the real value with
+        // an empty one.
+        let values = singleWindow ? [five ?? 0] : [five ?? 0, week ?? 0]
         let gaugeW: CGFloat = 7, gap: CGFloat = 5
-        let size = NSSize(width: gaugeW * 2 + gap, height: height)
+        let size = NSSize(width: gaugeW * CGFloat(values.count) + gap * CGFloat(values.count - 1),
+                          height: height)
 
         let img = NSImage(size: size, flipped: false) { _ in
             for (i, v) in values.enumerated() {

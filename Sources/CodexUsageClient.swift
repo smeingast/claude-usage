@@ -24,6 +24,9 @@ struct CodexUsageClient: Sendable {
     /// One backfill data point: a `token_count` event's UTC time plus the two
     /// windows' observed percentages and resets. Carries only what the history
     /// samples need; the decimator downstream stamps samples with `timestamp`.
+    /// One backfilled `token_count` reading. `primary`/`secondary` name the app's
+    /// SLOTS (near-term / weekly), not the event's field positions: `slot` has already
+    /// keyed them by `window_minutes`. Either can be nil.
     struct Event: Sendable {
         var timestamp: Date
         var primaryPercent: Double?
@@ -416,17 +419,50 @@ struct CodexUsageClient: Sendable {
               (payload["type"] as? String) == "token_count",
               let rl = payload["rate_limits"] as? [String: Any],
               let observed = ISO.parse(obj["timestamp"] as? String) else { return nil }
-        let primary = window(from: rl["primary"], id: "primary")
-        let secondary = window(from: rl["secondary"], id: "secondary")
-        guard primary != nil || secondary != nil else { return nil }
+        let observedWindows = windows(in: rl)
+        guard !observedWindows.isEmpty else { return nil }
+        let (near, week) = slot(observedWindows)
         return ProviderUsageSnapshot(
             provider: .codex,
-            primary: primary,
-            secondary: secondary,
+            primary: near,
+            secondary: week,
             extras: [],
             freshness: .observed(observed),
             fetchedAt: fetchedAt,
             planType: rl["plan_type"] as? String)
+    }
+
+    /// The window lengths Codex is known to report. Slotting keys on these rather
+    /// than on a window's POSITION in the event: on 2026-07-12 OpenAI moved the
+    /// weekly window into `rate_limits.primary` and dropped `secondary` entirely for
+    /// plus accounts, so `primary == 5-hour` was never a contract. Reading the length
+    /// keeps both shapes (and a future return to the old one) correct with no code
+    /// change.
+    static let nearWindowMinutes = 300
+    static let weeklyWindowMinutes = 10080
+
+    /// The windows an event actually carries, in the order the event listed them.
+    static func windows(in rl: [String: Any]) -> [UsageWindow] {
+        [window(from: rl["primary"], id: "primary"),
+         window(from: rl["secondary"], id: "secondary")].compactMap { $0 }
+    }
+
+    /// Slot observed windows into the app's near-term / weekly slots BY LENGTH. A
+    /// recognized length claims its own slot; an unfamiliar one (or a window with no
+    /// `window_minutes`) takes the first free slot so it is still shown, carrying its
+    /// own data-driven title rather than borrowing "5-hour" / "Weekly". EITHER slot
+    /// can come back empty: a weekly-only account has no near-term window at all, and
+    /// every consumer downstream must treat the near slot as optional.
+    static func slot(_ observed: [UsageWindow]) -> (near: UsageWindow?, week: UsageWindow?) {
+        var near = observed.first { $0.windowMinutes == nearWindowMinutes }
+        var week = observed.first { $0.windowMinutes == weeklyWindowMinutes }
+        for w in observed where w.windowMinutes != nearWindowMinutes
+                            && w.windowMinutes != weeklyWindowMinutes {
+            if near == nil { near = w } else if week == nil { week = w }
+        }
+        near?.id = "primary"
+        week?.id = "secondary"
+        return (near, week)
     }
 
     /// Map one `rate_limits.primary` / `.secondary` object to a `UsageWindow`, or nil
@@ -448,12 +484,26 @@ struct CodexUsageClient: Sendable {
     static func windowTitle(minutes: Int?) -> String {
         guard let m = minutes, m > 0 else { return "Window" }
         switch m {
-        case 300:   return "5-hour"
-        case 10080: return "Weekly"
+        case nearWindowMinutes:   return "5-hour"
+        case weeklyWindowMinutes: return "Weekly"
         default:
             if m % 1440 == 0 { return "\(m / 1440)-day" }
             if m % 60 == 0 { return "\(m / 60)-hour" }
             return "\(m)-min"
+        }
+    }
+
+    /// The same label abbreviated for the surfaces that sit right next to a number
+    /// (the compact strip, the graph readout), where `windowTitle` is too long.
+    static func windowUnit(minutes: Int?) -> String {
+        guard let m = minutes, m > 0 else { return "win" }
+        switch m {
+        case nearWindowMinutes:   return "5h"
+        case weeklyWindowMinutes: return "wk"
+        default:
+            if m % 1440 == 0 { return "\(m / 1440)d" }
+            if m % 60 == 0 { return "\(m / 60)h" }
+            return "\(m)m"
         }
     }
 
@@ -468,14 +518,17 @@ struct CodexUsageClient: Sendable {
               let payload = obj["payload"] as? [String: Any],
               (payload["type"] as? String) == "token_count",
               let rl = payload["rate_limits"] as? [String: Any] else { return nil }
-        let primary = window(from: rl["primary"], id: "primary")
-        let secondary = window(from: rl["secondary"], id: "secondary")
-        guard primary != nil || secondary != nil else { return nil }
+        let observed = windows(in: rl)
+        guard !observed.isEmpty else { return nil }
+        // Slotted by LENGTH, exactly as the live snapshot is: the history samples an
+        // event decimates into share the snapshot's slots, so a weekly value can never
+        // be recorded (and later graphed) as a 5-hour series.
+        let (near, week) = slot(observed)
         return Event(timestamp: ts,
-                     primaryPercent: primary?.utilization,
-                     secondaryPercent: secondary?.utilization,
-                     primaryResetsAt: primary?.resetsAt,
-                     secondaryResetsAt: secondary?.resetsAt)
+                     primaryPercent: near?.utilization,
+                     secondaryPercent: week?.utilization,
+                     primaryResetsAt: near?.resetsAt,
+                     secondaryResetsAt: week?.resetsAt)
     }
 
     /// True when the line is an `event_msg`/`token_count` with a non-null

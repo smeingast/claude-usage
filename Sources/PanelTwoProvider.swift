@@ -22,7 +22,7 @@ enum PanelRings {
     static func draw(in rect: NSRect, five: Double?, week: Double?, projected: Double?,
                      mode: ColorMode, provider: UsageProviderKind, role: ProviderRole = .primary,
                      inferredFive: Bool = false, inferredWeek: Bool = false,
-                     signedOut: Bool = false) {
+                     signedOut: Bool = false, singleWindow: Bool = false) {
         let size = rect.width
         let lw = size * 0.092
         let c = NSPoint(x: rect.midX, y: rect.midY)
@@ -60,6 +60,23 @@ enum PanelRings {
 
         // Signed out: empty tracks, no values (matches PanelHeaderView).
         if signedOut { trackRing(rO); trackRing(rI); return }
+
+        // One-window provider (Codex, weekly-only since 2026-07-12): a SINGLE ring. The
+        // sole window takes the outer radius -- the headline ring -- and the full
+        // headline accent rather than the weekly companion tint, matching the promoted
+        // number beside it. Drawing the second ring would leave an empty track that
+        // reads as a 5-hour window at zero. There is no forecast without a near-term
+        // window, so no ghost arc arises here.
+        if singleWindow {
+            if inferredWeek {
+                dashedTrack(rO)
+            } else {
+                trackRing(rO)
+                arc(radius: rO, frac: (week ?? 0) / 100,
+                    color: StatusRenderer.color(week ?? 0, mode, provider: provider, role: role))
+            }
+            return
+        }
 
         // Outer ring (5-hour). rO and rI never overlap, so the inter-ring draw order
         // is immaterial; within the ring the order (track, ghost, value) matches v0.8.
@@ -331,6 +348,12 @@ struct StripModel {
     var resetLine: String?        // "resets HH:MM \u{00B7} 4h 35m" (+ appended extras)
     var subBanner: BannerModel?   // inferred/aged sub-banner (drives the strip height)
     var otherLabel: String        // the provider Lead would promote (for the tooltip/a11y)
+    // Window shape (v0.10.1), mirroring PanelHeaderModel: Codex may report only the
+    // weekly window. Defaults are the two-window shape with today's literal units.
+    var fiveUnit: String = "5h"
+    var weekUnit: String = "wk"
+    var weekIsRed: Bool = false
+    var hideFive: Bool = false    // no near-term window: drop its figure, promote the other
 }
 
 @MainActor
@@ -392,7 +415,7 @@ final class StripView: NSView {
                         week: m.hasData ? (m.week ?? 0) : nil, projected: nil,
                         mode: m.mode, provider: m.provider, role: .secondary,
                         inferredFive: m.inferredFive, inferredWeek: m.inferredWeek,
-                        signedOut: !m.hasData)
+                        signedOut: !m.hasData, singleWindow: m.hideFive)
 
         // Lead button, right. Drawn first so the text column knows its right edge.
         let leadFont = NSFont.systemFont(ofSize: 10.5, weight: .semibold)
@@ -474,17 +497,25 @@ final class StripView: NSView {
                 sp.stroke()
                 vx += sw + 5
             }
-            let fiveStr = m.five == nil ? "\u{2014}" : "\(Int(m.five!.rounded()))%"
-            let fiveCol: NSColor = m.fiveIsRed ? .systemRed : .labelColor
-            PanelStyle.draw(fiveStr, at: NSPoint(x: vx, y: valY), font: bigFont, color: fiveCol)
-            vx += ceil(PanelStyle.size(fiveStr, font: bigFont).width) + 5
-            PanelStyle.draw("5h", at: NSPoint(x: vx, y: valY + 4), font: unitFont, color: .tertiaryLabelColor)
-            vx += 24
-            if m.inferredFive, let raw = m.rawFivePct { strike(raw) }
+            // A provider with no near-term window (Codex, weekly-only) skips that figure
+            // entirely; the window it does report inherits the headline weight.
+            if !m.hideFive {
+                let fiveStr = m.five == nil ? "\u{2014}" : "\(Int(m.five!.rounded()))%"
+                let fiveCol: NSColor = m.fiveIsRed ? .systemRed : .labelColor
+                PanelStyle.draw(fiveStr, at: NSPoint(x: vx, y: valY), font: bigFont, color: fiveCol)
+                vx += ceil(PanelStyle.size(fiveStr, font: bigFont).width) + 5
+                PanelStyle.draw(m.fiveUnit, at: NSPoint(x: vx, y: valY + 4), font: unitFont, color: .tertiaryLabelColor)
+                vx += 24
+                if m.inferredFive, let raw = m.rawFivePct { strike(raw) }
+            }
             let weekStr = m.week == nil ? "\u{2014}" : "\(Int(m.week!.rounded()))%"
-            PanelStyle.draw(weekStr, at: NSPoint(x: vx, y: valY + 2), font: midFont, color: .secondaryLabelColor)
-            vx += ceil(PanelStyle.size(weekStr, font: midFont).width) + 5
-            PanelStyle.draw("wk", at: NSPoint(x: vx, y: valY + 4), font: unitFont, color: .tertiaryLabelColor)
+            let weekFont = m.hideFive ? bigFont : midFont
+            let weekCol: NSColor = m.weekIsRed ? .systemRed
+                                 : (m.hideFive ? .labelColor : .secondaryLabelColor)
+            PanelStyle.draw(weekStr, at: NSPoint(x: vx, y: m.hideFive ? valY : valY + 2),
+                            font: weekFont, color: weekCol)
+            vx += ceil(PanelStyle.size(weekStr, font: weekFont).width) + 5
+            PanelStyle.draw(m.weekUnit, at: NSPoint(x: vx, y: valY + 4), font: unitFont, color: .tertiaryLabelColor)
             vx += 22
             if m.inferredWeek, let raw = m.rawWeekPct { strike(raw) }
             if m.inferredFive || m.inferredWeek {
